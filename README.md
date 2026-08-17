@@ -21,6 +21,8 @@ adds SQLite-backed owner sessions, live owner presence, and articles.
   editor. Article writes are enforced server-side.
 - Published Markdown is discovered from `main/articles` through the server.
   The filename list loads first; a file body is fetched only when opened.
+- Markdown images keep their original quality in the browser and use compact
+  true-color previews over SSH.
 
 ## Requirements
 

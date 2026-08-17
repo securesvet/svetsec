@@ -78,6 +78,7 @@ pub async fn serve(
         .route("/api/articles", get(articles).post(save_article))
         .route("/api/github/articles", get(github_articles))
         .route("/api/github/articles/{slug}", get(github_article))
+        .route("/api/github/assets/{*path}", get(github_asset))
         .fallback_service(ServeDir::new(static_dir).append_index_html_on_directories(true))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -198,6 +199,27 @@ async fn github_article(
         .await
         .map(Json)
         .map_err(github_error)
+}
+
+async fn github_asset(
+    State(state): State<HttpState>,
+    Path(path): Path<String>,
+) -> Result<Response, ApiError> {
+    let asset = state.github.asset(&path).await.map_err(github_error)?;
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(asset.content_type),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=300"),
+            ),
+        ],
+        asset.bytes,
+    )
+        .into_response())
 }
 
 fn state_response(

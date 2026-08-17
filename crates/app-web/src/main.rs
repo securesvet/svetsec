@@ -20,7 +20,8 @@ use web_sys::{Request, RequestCredentials, RequestInit, Response};
 fn main() -> io::Result<()> {
     let app = Rc::new(RefCell::new(App::default()));
     let viewport = Rc::new(Cell::new(ratzilla::ratatui::layout::Rect::default()));
-    let backend = DomBackend::new()?;
+    let browser_image_count = Rc::new(Cell::new(0_usize));
+    let backend = DomBackend::new_by_id("terminal")?;
     let mut terminal = Terminal::new(backend)?;
 
     terminal.on_key_event({
@@ -135,8 +136,78 @@ fn main() -> io::Result<()> {
 
     terminal.draw_web(move |frame| {
         viewport.set(frame.area());
-        svetsec_ui::render(frame, &app.borrow());
+        let app = app.borrow();
+        svetsec_ui::render(frame, &app);
+        let _ = sync_browser_images(&app, frame.area(), &browser_image_count);
     });
+    Ok(())
+}
+
+fn sync_browser_images(
+    app: &App,
+    area: ratzilla::ratatui::layout::Rect,
+    previous_count: &Cell<usize>,
+) -> Result<(), JsValue> {
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("window unavailable"))?;
+    let document = window
+        .document()
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+        return Ok(());
+    };
+    let Some(first_row) = grid.query_selector("pre")? else {
+        return Ok(());
+    };
+    let Some(first_cell) = first_row.query_selector("span")? else {
+        return Ok(());
+    };
+    let Some(layer) = document.get_element_by_id("article-media-layer") else {
+        return Ok(());
+    };
+    let row_rect = first_row.get_bounding_client_rect();
+    let cell_rect = first_cell.get_bounding_client_rect();
+    let cell_width = cell_rect.width();
+    let row_height = row_rect.height();
+    if cell_width <= 0.0 || row_height <= 0.0 {
+        return Ok(());
+    }
+
+    let placements = svetsec_ui::article_image_placements(area, app);
+    for (index, placement) in placements.iter().enumerate() {
+        let id = format!("article-native-image-{index}");
+        let image = match document.get_element_by_id(&id) {
+            Some(image) => image,
+            None => {
+                let image = document.create_element("img")?;
+                image.set_attribute("id", &id)?;
+                image.set_attribute("class", "native-article-image")?;
+                layer.append_child(&image)?;
+                image
+            }
+        };
+        let left = row_rect.left() + f64::from(placement.x) * cell_width;
+        let top = row_rect.top() + f64::from(placement.y) * row_height;
+        let width = f64::from(placement.width) * cell_width;
+        let height = f64::from(placement.height) * row_height;
+        let clip_top = f64::from(placement.clip_top) * row_height;
+        let clip_right = f64::from(placement.clip_right) * cell_width;
+        let clip_bottom = f64::from(placement.clip_bottom) * row_height;
+        image.set_attribute("src", &format!("/api/github/assets/{}", placement.source))?;
+        image.set_attribute("alt", placement.alt)?;
+        image.set_attribute(
+            "style",
+            &format!(
+                "display:block;left:{left}px;top:{top}px;width:{width}px;height:{height}px;\
+                 clip-path:inset({clip_top}px {clip_right}px {clip_bottom}px 0px);"
+            ),
+        )?;
+    }
+    for index in placements.len()..previous_count.get() {
+        if let Some(image) = document.get_element_by_id(&format!("article-native-image-{index}")) {
+            image.set_attribute("style", "display:none")?;
+        }
+    }
+    previous_count.set(placements.len());
     Ok(())
 }
 

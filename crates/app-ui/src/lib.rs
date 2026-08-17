@@ -31,6 +31,19 @@ struct UiLayout {
     compact: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArticleImagePlacement<'a> {
+    pub source: &'a str,
+    pub alt: &'a str,
+    pub x: i32,
+    pub y: i32,
+    pub width: u16,
+    pub height: u16,
+    pub clip_top: u16,
+    pub clip_right: u16,
+    pub clip_bottom: u16,
+}
+
 #[must_use]
 pub fn tab_at(area: Rect, column: u16, row: u16) -> Option<Tab> {
     layout(area)
@@ -87,6 +100,63 @@ pub fn help_target_at(area: Rect, column: u16, row: u16) -> Option<HelpTarget> {
         return Some(HelpTarget::Status);
     }
     (layout.content.contains(position)).then_some(HelpTarget::Articles)
+}
+
+#[must_use]
+pub fn article_image_placements<'a>(area: Rect, app: &'a App) -> Vec<ArticleImagePlacement<'a>> {
+    if app.selected() != Tab::Articles || app.language_notice() {
+        return Vec::new();
+    }
+    let Some(article) = app.opened_article() else {
+        return Vec::new();
+    };
+    let content = layout(area).content;
+    let primary = if content.width >= 76 {
+        Layout::horizontal([
+            Constraint::Percentage(68),
+            Constraint::Length(1),
+            Constraint::Percentage(32),
+        ])
+        .split(content)[0]
+    } else {
+        content
+    };
+    let compact = area.width < MOBILE_BREAKPOINT;
+    let horizontal_padding = if compact { 1 } else { 2 };
+    let bottom_padding = if compact { 0 } else { 1 };
+    let content_left = i32::from(primary.left()) + 1 + horizontal_padding;
+    let content_right = i32::from(primary.right()) - 1 - horizontal_padding;
+    let content_top = i32::from(primary.top()) + 2;
+    let content_bottom = i32::from(primary.bottom()) - 1 - bottom_padding;
+    let markdown_top = content_top + 4 - i32::from(app.article_scroll());
+
+    markdown_image_offsets(&article.markdown, &article.images)
+        .into_iter()
+        .filter_map(|(image, offset)| {
+            let x = content_left;
+            let y = markdown_top + i32::from(offset);
+            let width = image.width;
+            let height = image.height.div_ceil(2);
+            let right = x + i32::from(width);
+            let bottom = y + i32::from(height);
+            let clip_top = (content_top - y).max(0).min(i32::from(height)) as u16;
+            let clip_right = (right - content_right).max(0).min(i32::from(width)) as u16;
+            let clip_bottom = (bottom - content_bottom).max(0).min(i32::from(height)) as u16;
+            (clip_top + clip_bottom < height && clip_right < width).then_some(
+                ArticleImagePlacement {
+                    source: &image.source,
+                    alt: &image.alt,
+                    x,
+                    y,
+                    width,
+                    height,
+                    clip_top,
+                    clip_right,
+                    clip_bottom,
+                },
+            )
+        })
+        .collect()
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
@@ -447,6 +517,39 @@ fn markdown_image(line: &str) -> Option<(&str, &str)> {
     (!source.is_empty()).then_some((alt.trim(), source))
 }
 
+fn markdown_image_offsets<'a>(
+    markdown: &str,
+    images: &'a [ArticleImage],
+) -> Vec<(&'a ArticleImage, u16)> {
+    let mut offsets = Vec::new();
+    let mut row = 0_u16;
+    let mut code = false;
+    let mut front_matter = false;
+    for (index, raw) in markdown.lines().enumerate() {
+        if raw.trim() == "---" && (index == 0 || front_matter) {
+            front_matter = !front_matter;
+            continue;
+        }
+        if front_matter {
+            continue;
+        }
+        if raw.trim_start().starts_with("```") {
+            code = !code;
+            continue;
+        }
+        if !code
+            && let Some((_, source)) = markdown_image(raw)
+            && let Some(image) = images.iter().find(|image| image.source == source)
+        {
+            offsets.push((image, row));
+            row = row.saturating_add(image.height.div_ceil(2).max(1));
+        } else {
+            row = row.saturating_add(1);
+        }
+    }
+    offsets
+}
+
 fn image_lines(image: &ArticleImage) -> Vec<Line<'static>> {
     let width = usize::from(image.width);
     let height = usize::from(image.height);
@@ -740,9 +843,12 @@ fn interpolate(start: Color, end: Color, position: u16, denominator: u16) -> Col
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
-    use svetsec_core::{App, ArticleImage, ArticleSummary, Message, Tab};
+    use svetsec_core::{App, ArticleContent, ArticleImage, ArticleSummary, Message, Tab};
 
-    use super::{article_at, help_target_at, layout, markdown_lines, render, single_line, tab_at};
+    use super::{
+        article_at, article_image_placements, help_target_at, layout, markdown_lines, render,
+        single_line, tab_at,
+    };
 
     #[test]
     fn desktop_ui_renders_on_the_shared_test_backend() {
@@ -854,5 +960,28 @@ mod tests {
             lines[0].spans[0].style.bg,
             Some(ratatui::style::Color::Rgb(4, 5, 6))
         );
+    }
+
+    #[test]
+    fn browser_image_placement_tracks_the_markdown_row() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "earth".into(),
+            title: "Earth".into(),
+            markdown: "Paragraph\n\n![Earth](assets/earth.png)".into(),
+            images: vec![ArticleImage {
+                source: "assets/earth.png".into(),
+                alt: "Earth".into(),
+                width: 32,
+                height: 32,
+                pixels: vec![0; 32 * 32 * 3],
+            }],
+        });
+        let placements = article_image_placements(Rect::new(0, 0, 100, 30), &app);
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].source, "assets/earth.png");
+        assert_eq!((placements[0].width, placements[0].height), (32, 16));
+        assert!(placements[0].y > 0);
     }
 }

@@ -11,7 +11,8 @@ Create public articles as `articles/<slug>.md` on the `main` branch.
   rendered by the browser and SSH interfaces.
 - Put article images under `articles/assets/` and reference them on a separate
   line, for example `![Pixel Earth](assets/earth.png)`. PNG, JPEG, and WebP are
-  rendered as terminal-friendly pixel art in both the browser and SSH.
+  displayed as regular responsive images in the browser and as true-color
+  terminal previews over SSH.
 - Files whose names start with `_` are documentation and are not listed as
   articles.
 

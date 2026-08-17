@@ -3210,6 +3210,7 @@ dependencies = [
  "anyhow",
  "argon2 0.5.3",
  "axum",
+ "bytes",
  "image",
  "ratatui",
  "reqwest",

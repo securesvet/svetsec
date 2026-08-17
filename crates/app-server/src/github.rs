@@ -24,6 +24,7 @@ struct Inner {
     token: Option<String>,
     list_cache: RwLock<Option<Cached<Vec<GithubArticle>>>>,
     body_cache: RwLock<HashMap<String, Cached<GithubArticleBody>>>,
+    asset_cache: RwLock<HashMap<String, Cached<GithubAsset>>>,
 }
 
 struct Cached<T> {
@@ -60,6 +61,12 @@ pub struct GithubArticleImage {
     pub pixels: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+pub struct GithubAsset {
+    pub content_type: &'static str,
+    pub bytes: bytes::Bytes,
+}
+
 #[derive(Deserialize)]
 struct ContentsEntry {
     name: String,
@@ -91,6 +98,7 @@ impl GithubSource {
             token,
             list_cache: RwLock::new(None),
             body_cache: RwLock::new(HashMap::new()),
+            asset_cache: RwLock::new(HashMap::new()),
         })))
     }
 
@@ -218,16 +226,13 @@ impl GithubSource {
         }
     }
 
-    fn request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let request = request.header("X-GitHub-Api-Version", "2022-11-28");
-        match &self.0.token {
-            Some(token) => request.bearer_auth(token),
-            None => request,
-        }
-    }
-
-    async fn article_image(&self, source: &str, alt: &str) -> Result<GithubArticleImage> {
+    pub async fn asset(&self, source: &str) -> Result<GithubAsset> {
         let path = article_asset_path(source)?;
+        if let Some(cache) = self.0.asset_cache.read().await.get(&path)
+            && cache.stored_at.elapsed() < BODY_CACHE_TTL
+        {
+            return Ok(cache.value.clone());
+        }
         let url = format!(
             "https://api.github.com/repos/{}/{}/contents/{path}",
             self.0.owner, self.0.repository
@@ -247,7 +252,31 @@ impl GithubSource {
         if bytes.len() > MAX_IMAGE_BYTES {
             bail!("article image is larger than 5 MiB");
         }
-        rasterize_image(source, alt, &bytes)
+        let asset = GithubAsset {
+            content_type: image_content_type(source)?,
+            bytes,
+        };
+        self.0.asset_cache.write().await.insert(
+            path,
+            Cached {
+                value: asset.clone(),
+                stored_at: tokio::time::Instant::now(),
+            },
+        );
+        Ok(asset)
+    }
+
+    fn request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let request = request.header("X-GitHub-Api-Version", "2022-11-28");
+        match &self.0.token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
+    }
+
+    async fn article_image(&self, source: &str, alt: &str) -> Result<GithubArticleImage> {
+        let asset = self.asset(source).await?;
+        rasterize_image(source, alt, &asset.bytes)
     }
 }
 
@@ -275,11 +304,17 @@ fn article_asset_path(source: &str) -> Result<String> {
     {
         bail!("invalid article image path");
     }
-    let extension = source.rsplit_once('.').map(|(_, extension)| extension);
-    if !matches!(extension, Some("png" | "jpg" | "jpeg" | "webp")) {
-        bail!("unsupported article image format");
-    }
+    image_content_type(source)?;
     Ok(format!("articles/{source}"))
+}
+
+fn image_content_type(source: &str) -> Result<&'static str> {
+    match source.rsplit_once('.').map(|(_, extension)| extension) {
+        Some("png") => Ok("image/png"),
+        Some("jpg" | "jpeg") => Ok("image/jpeg"),
+        Some("webp") => Ok("image/webp"),
+        _ => bail!("unsupported article image format"),
+    }
 }
 
 fn rasterize_image(source: &str, alt: &str, bytes: &[u8]) -> Result<GithubArticleImage> {
@@ -294,7 +329,7 @@ fn rasterize_image(source: &str, alt: &str, bytes: &[u8]) -> Result<GithubArticl
     let width = (f64::from(source_width) * scale).round().max(1.0) as u32;
     let height = (f64::from(source_height) * scale).round().max(1.0) as u32;
     let resized = source_image
-        .resize_exact(width, height, FilterType::Nearest)
+        .resize_exact(width, height, FilterType::Triangle)
         .to_rgba8();
     let mut pixels = Vec::with_capacity((width * height * 3) as usize);
     for pixel in resized.pixels() {
