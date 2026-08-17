@@ -1,0 +1,13 @@
+[build]
+target = "crates/app-web/index.html"
+dist = "dist"
+public_url = "/"
+filehash = true
+# Trunk 0.21's JS minifier does not yet parse wasm-bindgen 0.2.127 output.
+# wasm-opt still optimizes the WebAssembly binary in release builds.
+minify = "never"
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+open = false

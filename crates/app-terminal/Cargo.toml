@@ -1,0 +1,17 @@
+[package]
+name = "svetsec-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "svetsec"
+path = "src/main.rs"
+
+[dependencies]
+crossterm.workspace = true
+open.workspace = true
+ratatui = { workspace = true, features = ["crossterm"] }
+svetsec-core = { path = "../app-core" }
+svetsec-ui = { path = "../app-ui" }

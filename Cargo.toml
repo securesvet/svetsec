@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/app-core",
+    "crates/app-ui",
+    "crates/app-terminal",
+    "crates/app-web",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+ratatui = { version = "0.30.2", default-features = false }
+crossterm = "0.29.0"
+critical-section = { version = "1.2.0", features = ["std"] }
+open = "5.3.2"
+ratzilla = "0.3.1"
