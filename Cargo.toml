@@ -4,6 +4,7 @@ members = [
     "crates/app-ui",
     "crates/app-terminal",
     "crates/app-web",
+    "crates/app-server",
 ]
 resolver = "2"
 
@@ -17,5 +18,24 @@ rust-version = "1.85"
 ratatui = { version = "0.30.2", default-features = false }
 crossterm = "0.29.0"
 critical-section = { version = "1.2.0", features = ["std"] }
+gloo-timers = { version = "0.3.0", features = ["futures"] }
+js-sys = "0.3"
 open = "5.3.2"
 ratzilla = "0.3.1"
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
+argon2 = "0.5.3"
+anyhow = "1.0"
+axum = "0.8.6"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+russh = "0.62.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10.9"
+tokio = { version = "1.47", features = ["full"] }
+tower-http = { version = "0.6.6", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.18", features = ["v4"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = "0.3"

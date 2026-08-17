@@ -6,7 +6,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
 };
-use svetsec_core::{App, Tab};
+use svetsec_core::{App, HelpTarget, Language, Tab};
 
 const WHITE: Color = Color::Rgb(255, 255, 255);
 const PAPER: Color = Color::Rgb(250, 250, 248);
@@ -18,6 +18,7 @@ const GRAPHITE: Color = Color::Rgb(70, 74, 78);
 const MID_GRAY: Color = Color::Rgb(148, 152, 154);
 const BODY: Color = Color::Rgb(54, 58, 61);
 const MUTED: Color = Color::Rgb(105, 109, 112);
+const ONLINE_GREEN: Color = Color::Rgb(26, 166, 90);
 const MOBILE_BREAKPOINT: u16 = 56;
 
 struct UiLayout {
@@ -26,6 +27,7 @@ struct UiLayout {
     footer: Rect,
     logo: Rect,
     tabs: [Rect; 3],
+    status: Option<Rect>,
     compact: bool,
 }
 
@@ -38,18 +40,70 @@ pub fn tab_at(area: Rect, column: u16, row: u16) -> Option<Tab> {
         .find_map(|(area, tab)| area.contains((column, row).into()).then_some(tab))
 }
 
+#[must_use]
+pub fn article_at(area: Rect, column: u16, row: u16, app: &App) -> Option<usize> {
+    if app.selected() != Tab::Articles
+        || app.articles_loading()
+        || app.article_loading()
+        || app.opened_article().is_some()
+    {
+        return None;
+    }
+    let content = layout(area).content;
+    let primary = if content.width >= 76 {
+        Layout::horizontal([
+            Constraint::Percentage(68),
+            Constraint::Length(1),
+            Constraint::Percentage(32),
+        ])
+        .split(content)[0]
+    } else {
+        content
+    };
+    if column <= primary.left() || column >= primary.right().saturating_sub(1) {
+        return None;
+    }
+    let first_row = primary.top().saturating_add(4);
+    let index = row.checked_sub(first_row)? as usize;
+    (index < app.articles().len().min(12)).then_some(index)
+}
+
+#[must_use]
+pub fn help_target_at(area: Rect, column: u16, row: u16) -> Option<HelpTarget> {
+    let layout = layout(area);
+    let position = (column, row).into();
+    if layout.logo.contains(position) {
+        return Some(HelpTarget::Logo);
+    }
+    if let Some((_, tab)) = layout
+        .tabs
+        .into_iter()
+        .zip(Tab::ALL)
+        .find(|(area, _)| area.contains(position))
+    {
+        return Some(HelpTarget::Tab(tab));
+    }
+    if layout.status.is_some_and(|area| area.contains(position)) {
+        return Some(HelpTarget::Status);
+    }
+    (layout.content.contains(position)).then_some(HelpTarget::Articles)
+}
+
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
     frame.render_widget(Clear, area);
     frame.render_widget(Block::new().style(Style::new().bg(WHITE)), area);
 
     let layout = layout(area);
-    render_header(frame, &layout, app.selected());
-    render_content(frame, layout.content, app.selected(), layout.compact);
+    render_header(frame, &layout, app);
+    render_content(frame, layout.content, app);
     render_footer(frame, layout.footer, app, layout.compact);
+    if app.language_notice() {
+        render_language_notice(frame, area, app.language());
+    }
 }
 
-fn render_header(frame: &mut Frame<'_>, layout: &UiLayout, selected: Tab) {
+fn render_header(frame: &mut Frame<'_>, layout: &UiLayout, app: &App) {
     paint_horizontal_background(frame.buffer_mut(), layout.header, PAPER, SOFT_GRAY);
     frame.render_widget(
         Block::new()
@@ -61,7 +115,14 @@ fn render_header(frame: &mut Frame<'_>, layout: &UiLayout, selected: Tab) {
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("● ", Style::new().fg(INK)),
+            Span::styled(
+                "● ",
+                Style::new().fg(if app.owner_online() {
+                    ONLINE_GREEN
+                } else {
+                    MID_GRAY
+                }),
+            ),
             Span::styled(
                 "svetsec.ru",
                 Style::new().fg(INK).add_modifier(Modifier::BOLD),
@@ -79,14 +140,14 @@ fn render_header(frame: &mut Frame<'_>, layout: &UiLayout, selected: Tab) {
         let selected_style = Style::new().fg(WHITE).add_modifier(Modifier::BOLD);
         let idle_style = Style::new().fg(MUTED);
 
-        if tab == selected {
+        if tab == app.selected() {
             paint_horizontal_background(frame.buffer_mut(), tab_area, INK, GRAPHITE);
         }
 
         frame.render_widget(
-            Paragraph::new(tab.label())
+            Paragraph::new(tab.label(app.language()))
                 .alignment(Alignment::Center)
-                .style(if tab == selected {
+                .style(if tab == app.selected() {
                     selected_style
                 } else {
                     idle_style
@@ -96,47 +157,84 @@ fn render_header(frame: &mut Frame<'_>, layout: &UiLayout, selected: Tab) {
     }
 }
 
-fn render_content(frame: &mut Frame<'_>, area: Rect, selected: Tab, compact: bool) {
-    if !compact && area.width >= 76 {
+fn render_language_notice(frame: &mut Frame<'_>, area: Rect, language: Language) {
+    let width = 12.min(area.width);
+    let height = 5.min(area.height);
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::default(),
+            Line::from(Span::styled(
+                language.flag(),
+                Style::new().fg(INK).add_modifier(Modifier::BOLD),
+            ))
+            .centered(),
+        ])
+        .block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .style(Style::new().bg(PAPER)),
+        ),
+        popup,
+    );
+    paint_gradient_border(frame.buffer_mut(), popup, INK, MID_GRAY);
+}
+
+fn render_content(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    if area.width >= 76 {
         let columns = Layout::horizontal([
             Constraint::Percentage(68),
             Constraint::Length(1),
             Constraint::Percentage(32),
         ])
         .split(area);
-        render_primary_panel(frame, columns[0], selected, false);
-        render_status_panel(frame, columns[2]);
+        render_primary_panel(frame, columns[0], app, false);
+        render_status_panel(frame, columns[2], app);
     } else {
-        render_primary_panel(frame, area, selected, compact);
+        render_primary_panel(frame, area, app, true);
     }
 }
 
-fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, selected: Tab, compact: bool) {
+fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
+    if app.selected() == Tab::Articles {
+        render_articles_panel(frame, area, app, compact);
+        return;
+    }
     frame.render_widget(Block::new().style(Style::new().bg(PANEL)), area);
 
-    let content = Text::from(vec![
+    let content = vec![
         Line::from(vec![
             Span::styled("● ONLINE", Style::new().fg(INK).bold()),
             Span::styled("  //  RUST + WASM", Style::new().fg(MUTED)),
         ]),
         Line::default(),
         Line::from(Span::styled(
-            selected.title(),
+            app.selected().title(app.language()),
             Style::new().fg(INK).add_modifier(Modifier::BOLD),
         )),
         Line::default(),
-        Line::from(Span::styled(selected.description(), Style::new().fg(BODY))),
+        Line::from(Span::styled(
+            app.selected().description(app.language()),
+            Style::new().fg(BODY),
+        )),
         Line::default(),
         Line::from(vec![
             Span::styled("SIGNAL  ", Style::new().fg(MUTED)),
             Span::styled("▁▂▃▅▇█▇▆▄▃▅▆", Style::new().fg(GRAPHITE)),
         ]),
-    ]);
+    ];
 
     let block = Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(Line::from(format!(" {} ", selected.label())).fg(INK))
+        .title(Line::from(format!(" {} ", app.selected().label(app.language()))).fg(INK))
         .padding(if compact {
             Padding::new(1, 1, 1, 0)
         } else {
@@ -144,7 +242,7 @@ fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, selected: Tab, compac
         });
 
     frame.render_widget(
-        Paragraph::new(content)
+        Paragraph::new(Text::from(content))
             .block(block)
             .wrap(Wrap { trim: true }),
         area,
@@ -152,18 +250,217 @@ fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, selected: Tab, compac
     paint_gradient_border(frame.buffer_mut(), area, INK, MID_GRAY);
 }
 
-fn render_status_panel(frame: &mut Frame<'_>, area: Rect) {
+fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
+    frame.render_widget(Block::new().style(Style::new().bg(PANEL)), area);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("● SYNC", Style::new().fg(INK).bold()),
+        Span::styled("  //  GITHUB main/articles", Style::new().fg(MUTED)),
+    ])];
+
+    if app.articles_loading() || app.article_loading() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            match app.language() {
+                Language::En if app.article_loading() => "Loading Markdown…",
+                Language::Ru if app.article_loading() => "Загружаем Markdown…",
+                Language::En => "Loading article names…",
+                Language::Ru => "Загружаем названия статей…",
+            },
+            Style::new().fg(MUTED),
+        )));
+        for row in 0..5 {
+            lines.push(skeleton_line(
+                area.width.saturating_sub(if compact { 6 } else { 10 }),
+                row,
+                app.skeleton_phase(),
+            ));
+        }
+    } else if let Some(article) = app.opened_article() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            article.title.clone(),
+            Style::new().fg(INK).bold(),
+        )));
+        lines.push(Line::default());
+        lines.extend(markdown_lines(&article.markdown));
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            match app.language() {
+                Language::En => "↑/↓ or j/k scroll · Esc back",
+                Language::Ru => "↑/↓ или о/л прокрутка · Esc назад",
+            },
+            Style::new().fg(MUTED),
+        )));
+    } else if let Some(error) = app.articles_error() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            error.to_owned(),
+            Style::new().fg(MUTED),
+        )));
+    } else if app.articles().is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            match app.language() {
+                Language::En => "No Markdown files in main/articles yet.",
+                Language::Ru => "В main/articles пока нет Markdown-файлов.",
+            },
+            Style::new().fg(MUTED),
+        )));
+    } else {
+        lines.push(Line::default());
+        for (index, article) in app.articles().iter().take(12).enumerate() {
+            let selected = index == app.selected_article_index();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::new().fg(INK).bold(),
+                ),
+                Span::styled(
+                    article.title(app.language()).to_owned(),
+                    if selected {
+                        Style::new().fg(WHITE).bg(INK).bold()
+                    } else {
+                        Style::new().fg(BODY)
+                    },
+                ),
+            ]));
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            match app.language() {
+                Language::En => "j/k select · Enter/o open · e edit · n new · f refresh",
+                Language::Ru => "о/л выбор · Enter/щ открыть · у правка · т новая · а обновить",
+            },
+            Style::new().fg(MUTED),
+        )));
+    }
+
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Line::from(format!(" {} ", Tab::Articles.label(app.language()))).fg(INK))
+        .padding(if compact {
+            Padding::new(1, 1, 1, 0)
+        } else {
+            Padding::new(2, 2, 1, 1)
+        });
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(block)
+            .scroll((app.article_scroll(), 0))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+    paint_gradient_border(frame.buffer_mut(), area, INK, MID_GRAY);
+}
+
+fn skeleton_line(width: u16, row: u8, phase: u8) -> Line<'static> {
+    let length = match row {
+        0 => width.saturating_mul(4) / 5,
+        1 => width.saturating_mul(3) / 5,
+        2 => width.saturating_mul(7) / 10,
+        3 => width.saturating_mul(1) / 2,
+        _ => width.saturating_mul(2) / 3,
+    }
+    .max(4);
+    let spans = (0..length)
+        .map(|column| {
+            let distance = (u16::from(phase) + column + u16::from(row) * 3) % 24;
+            let brightness = if distance < 12 {
+                225 + distance as u8
+            } else {
+                225 + (23 - distance) as u8
+            };
+            Span::styled(
+                " ",
+                Style::new().bg(Color::Rgb(brightness, brightness, brightness)),
+            )
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
+}
+
+fn markdown_lines(markdown: &str) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut code = false;
+    let mut front_matter = false;
+    for (index, raw) in markdown.lines().enumerate() {
+        if raw.trim() == "---" && (index == 0 || front_matter) {
+            front_matter = !front_matter;
+            continue;
+        }
+        if front_matter {
+            continue;
+        }
+        if raw.trim_start().starts_with("```") {
+            code = !code;
+            continue;
+        }
+        let line = if code {
+            Line::from(Span::styled(
+                format!("  {raw}"),
+                Style::new().fg(GRAPHITE).bg(PANEL_ALT),
+            ))
+        } else if let Some(text) = raw.strip_prefix("### ") {
+            Line::from(Span::styled(text.to_owned(), Style::new().fg(INK).bold()))
+        } else if let Some(text) = raw.strip_prefix("## ") {
+            Line::from(Span::styled(text.to_owned(), Style::new().fg(INK).bold()))
+        } else if let Some(text) = raw.strip_prefix("# ") {
+            Line::from(Span::styled(
+                text.to_owned(),
+                Style::new().fg(INK).bold().underlined(),
+            ))
+        } else if let Some(text) = raw.strip_prefix("- ") {
+            Line::from(vec![
+                Span::styled("• ", Style::new().fg(INK).bold()),
+                Span::styled(text.to_owned(), Style::new().fg(BODY)),
+            ])
+        } else if let Some(text) = raw.strip_prefix("> ") {
+            Line::from(vec![
+                Span::styled("│ ", Style::new().fg(MID_GRAY)),
+                Span::styled(text.to_owned(), Style::new().fg(GRAPHITE).italic()),
+            ])
+        } else {
+            Line::from(Span::styled(raw.to_owned(), Style::new().fg(BODY)))
+        };
+        lines.push(line);
+    }
+    lines
+}
+
+fn render_status_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Block::new().style(Style::new().bg(PANEL_ALT)), area);
 
     let inner = area.inner(Margin::new(2, 2));
     paint_horizontal_background(frame.buffer_mut(), inner, PAPER, SOFT_GRAY);
 
+    let (session, owner, visitor, editor) = match app.language() {
+        Language::En => ("SESSION", "owner", "visitor", "editor"),
+        Language::Ru => ("СЕССИЯ", "владелец", "гость", "редактор"),
+    };
     let status = Text::from(vec![
-        Line::from(Span::styled("SESSION", Style::new().fg(MUTED).bold())),
+        Line::from(Span::styled(session, Style::new().fg(MUTED).bold())),
         Line::default(),
-        metric_line("runtime", "native / wasm"),
-        metric_line("render", "true color"),
-        metric_line("theme", "paper / graphite"),
+        metric_line(
+            "identity",
+            if app.authenticated() { owner } else { visitor },
+        ),
+        metric_line(
+            "presence",
+            if app.owner_online() {
+                "online"
+            } else {
+                "offline"
+            },
+        ),
+        metric_line(
+            "write",
+            if app.authenticated() {
+                editor
+            } else {
+                "locked"
+            },
+        ),
         Line::default(),
         Line::from(Span::styled("CPU  ▂▃▅▇▆▄", Style::new().fg(INK))),
         Line::from(Span::styled("NET  ▁▂▄▆█▅", Style::new().fg(GRAPHITE))),
@@ -185,30 +482,90 @@ fn render_status_panel(frame: &mut Frame<'_>, area: Rect) {
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     paint_horizontal_background(frame.buffer_mut(), area, PAPER, SOFT_GRAY);
 
-    let text = if app.awaiting_site_key() {
-        Text::from(Line::from(vec![
-            Span::styled(" g", Style::new().fg(INK).bold()),
-            Span::styled("_  press x to open svetsec.ru", Style::new().fg(BODY)),
-        ]))
-    } else if compact {
-        Text::from(vec![
-            Line::from("←/→ tabs  •  1–3 jump").centered(),
-            Line::from("gx site  •  q quit").centered(),
-        ])
-    } else {
-        Text::from(Line::from(vec![
-            Span::styled(" NAV ", Style::new().fg(WHITE).bg(INK).bold()),
-            Span::styled(" ← → / h l   ", Style::new().fg(BODY)),
-            Span::styled(" TABS ", Style::new().fg(WHITE).bg(GRAPHITE).bold()),
-            Span::styled(" 1 2 3   ", Style::new().fg(BODY)),
-            Span::styled(" OPEN ", Style::new().fg(WHITE).bg(MID_GRAY).bold()),
-            Span::styled(" g x   ", Style::new().fg(BODY)),
-            Span::styled(" QUIT ", Style::new().fg(MUTED)),
-            Span::styled(" q", Style::new().fg(BODY)),
-        ]))
-    };
+    if app.awaiting_site_key() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" g", Style::new().fg(INK).bold()),
+                Span::styled("_  press x to open svetsec.ru", Style::new().fg(BODY)),
+            ]))
+            .alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
 
-    frame.render_widget(Paragraph::new(text).alignment(Alignment::Center), area);
+    if compact {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from("←/→ tabs  •  1–3 jump").centered(),
+                Line::from(if app.authenticated() {
+                    "r lang  •  e write"
+                } else {
+                    "r lang  •  a owner"
+                })
+                .centered(),
+            ]),
+            area,
+        );
+        return;
+    }
+
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
+    let navigation = Line::from(vec![
+        Span::styled(" NAV ", Style::new().fg(WHITE).bg(INK).bold()),
+        Span::styled(" ← → / h l   ", Style::new().fg(BODY)),
+        Span::styled(" TABS ", Style::new().fg(WHITE).bg(GRAPHITE).bold()),
+        Span::styled(" 1 2 3   ", Style::new().fg(BODY)),
+        Span::styled(" OPEN ", Style::new().fg(WHITE).bg(MID_GRAY).bold()),
+        Span::styled(" g x   ", Style::new().fg(BODY)),
+        Span::styled(" QUIT ", Style::new().fg(MUTED)),
+        Span::styled(" q   ", Style::new().fg(BODY)),
+        Span::styled(" LANG ", Style::new().fg(WHITE).bg(GRAPHITE).bold()),
+        Span::styled(" r   ", Style::new().fg(BODY)),
+        Span::styled(
+            if app.authenticated() {
+                " WRITE "
+            } else {
+                " AUTH "
+            },
+            Style::new().fg(WHITE).bg(MID_GRAY).bold(),
+        ),
+        Span::styled(
+            if app.authenticated() { " e" } else { " a" },
+            Style::new().fg(BODY),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(navigation).alignment(Alignment::Center),
+        rows[0],
+    );
+
+    if let Some(target) = app.hovered() {
+        let help = single_line(
+            target.text(app.language(), app.owner_online()),
+            rows[1].width.min(56) as usize,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(help, Style::new().fg(BODY))))
+                .alignment(Alignment::Right),
+            rows[1],
+        );
+    }
+}
+
+fn single_line(text: &str, max_chars: usize) -> String {
+    let normalized = text.replace(['\r', '\n'], " ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    normalized
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .chain(std::iter::once('…'))
+        .collect()
 }
 
 fn metric_line(label: &'static str, value: &'static str) -> Line<'static> {
@@ -221,7 +578,7 @@ fn metric_line(label: &'static str, value: &'static str) -> Line<'static> {
 fn layout(area: Rect) -> UiLayout {
     let compact = area.width < MOBILE_BREAKPOINT;
     let header_height = if compact { 4 } else { 3 };
-    let footer_height = if compact { 2 } else { 1 };
+    let footer_height = 2;
     let vertical = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Min(5),
@@ -242,14 +599,23 @@ fn layout(area: Rect) -> UiLayout {
     } else {
         let columns = Layout::horizontal([
             Constraint::Length(15),
-            Constraint::Length(8),
+            Constraint::Length(11),
             Constraint::Length(12),
-            Constraint::Length(8),
+            Constraint::Length(11),
             Constraint::Min(0),
         ])
         .split(inner);
         (columns[0], [columns[1], columns[2], columns[3]])
     };
+
+    let status = (!compact && vertical[1].width >= 76).then(|| {
+        Layout::horizontal([
+            Constraint::Percentage(68),
+            Constraint::Length(1),
+            Constraint::Percentage(32),
+        ])
+        .split(vertical[1])[2]
+    });
 
     UiLayout {
         header: vertical[0],
@@ -257,6 +623,7 @@ fn layout(area: Rect) -> UiLayout {
         footer: vertical[2],
         logo,
         tabs,
+        status,
         compact,
     }
 }
@@ -314,9 +681,9 @@ fn interpolate(start: Color, end: Color, position: u16, denominator: u16) -> Col
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
-    use svetsec_core::{App, Message, Tab};
+    use svetsec_core::{App, ArticleSummary, Message, Tab};
 
-    use super::{layout, render, tab_at};
+    use super::{article_at, help_target_at, layout, render, single_line, tab_at};
 
     #[test]
     fn desktop_ui_renders_on_the_shared_test_backend() {
@@ -340,9 +707,13 @@ mod tests {
     fn desktop_menu_hit_testing_matches_visual_tabs() {
         let area = Rect::new(0, 0, 80, 24);
         assert_eq!(tab_at(area, 16, 1), Some(Tab::Main));
-        assert_eq!(tab_at(area, 25, 1), Some(Tab::Articles));
-        assert_eq!(tab_at(area, 37, 1), Some(Tab::Info));
+        assert_eq!(tab_at(area, 28, 1), Some(Tab::Articles));
+        assert_eq!(tab_at(area, 40, 1), Some(Tab::Info));
         assert_eq!(tab_at(area, 2, 1), None);
+        assert_eq!(
+            help_target_at(area, 2, 1),
+            Some(svetsec_core::HelpTarget::Logo)
+        );
     }
 
     #[test]
@@ -364,5 +735,41 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &app))
             .expect("pending shortcut UI should render");
+    }
+
+    #[test]
+    fn hover_hint_is_limited_to_one_line() {
+        let hint = single_line("Очень длинная\nподсказка для элемента", 18);
+        assert!(!hint.contains('\n'));
+        assert_eq!(hint.chars().count(), 18);
+        assert!(hint.ends_with('…'));
+    }
+
+    #[test]
+    fn article_loading_skeleton_renders() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.begin_articles_load();
+        let _ = app.update(Message::AdvanceSkeleton);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("skeleton should render");
+    }
+
+    #[test]
+    fn article_rows_are_mouse_targets() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_articles(vec![ArticleSummary {
+            slug: "one".into(),
+            title_en: "One".into(),
+            title_ru: "Один".into(),
+            published: true,
+            source_path: Some("articles/one.md".into()),
+            edit_url: None,
+        }]);
+        assert_eq!(article_at(Rect::new(0, 0, 80, 24), 5, 7, &app), Some(0));
     }
 }

@@ -1,4 +1,7 @@
-use std::{io, panic};
+use std::{
+    io, panic,
+    time::{Duration, Instant},
+};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{DefaultTerminal, init, restore};
@@ -14,15 +17,29 @@ fn main() -> io::Result<()> {
 
 fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
     let mut app = App::default();
+    let mut language_notice_deadline = None;
 
     while !app.should_quit() {
+        if let Some((deadline, generation)) = language_notice_deadline
+            && Instant::now() >= deadline
+        {
+            let _ = app.update(Message::HideLanguageNotice(generation));
+            language_notice_deadline = None;
+        }
         terminal.draw(|frame| svetsec_ui::render(frame, &app))?;
 
-        if let Event::Key(key) = event::read()?
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
             if let Some(effect) = app.update(message_for_key(key.code)) {
                 apply_effect(effect)?;
+            }
+            if matches!(key.code, KeyCode::Char('r' | 'к')) {
+                language_notice_deadline = Some((
+                    Instant::now() + Duration::from_millis(1_500),
+                    app.language_notice_generation(),
+                ));
             }
         }
     }
@@ -32,14 +49,15 @@ fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
 
 fn message_for_key(code: KeyCode) -> Message {
     match code {
-        KeyCode::Right | KeyCode::Tab | KeyCode::Char('l') => Message::NextTab,
-        KeyCode::Left | KeyCode::BackTab | KeyCode::Char('h') => Message::PreviousTab,
+        KeyCode::Right | KeyCode::Tab | KeyCode::Char('l' | 'д') => Message::NextTab,
+        KeyCode::Left | KeyCode::BackTab | KeyCode::Char('h' | 'р') => Message::PreviousTab,
         KeyCode::Char('1') => Message::SelectTab(Tab::Main),
         KeyCode::Char('2') => Message::SelectTab(Tab::Articles),
         KeyCode::Char('3') => Message::SelectTab(Tab::Info),
-        KeyCode::Char('g') => Message::BeginSiteShortcut,
-        KeyCode::Char('x') => Message::CompleteSiteShortcut,
-        KeyCode::Char('q') | KeyCode::Esc => Message::Quit,
+        KeyCode::Char('r' | 'к') => Message::ToggleLanguage,
+        KeyCode::Char('g' | 'п') => Message::BeginSiteShortcut,
+        KeyCode::Char('x' | 'ч') => Message::CompleteSiteShortcut,
+        KeyCode::Char('q' | 'й') | KeyCode::Esc => Message::Quit,
         _ => Message::CancelShortcut,
     }
 }
