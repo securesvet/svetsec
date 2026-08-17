@@ -20,7 +20,9 @@ use russh::{
     keys::{PrivateKey, ssh_key::PublicKey},
     server::{Auth, ChannelOpenHandle, Config, Handle, Handler, Msg, Server, Session},
 };
-use svetsec_core::{App, ArticleContent, ArticleSummary, HelpTarget, Language, Message, Tab};
+use svetsec_core::{
+    App, ArticleContent, ArticleImage, ArticleSummary, HelpTarget, Language, Message, Tab,
+};
 use tokio::sync::{Mutex, mpsc::UnboundedSender, mpsc::unbounded_channel};
 
 use crate::db::{ArticleInput, Database};
@@ -438,6 +440,17 @@ impl SshServer {
                         slug: article.slug,
                         title: article.title,
                         markdown: article.markdown,
+                        images: article
+                            .images
+                            .into_iter()
+                            .map(|image| ArticleImage {
+                                source: image.source,
+                                alt: image.alt,
+                                width: image.width,
+                                height: image.height,
+                                pixels: image.pixels,
+                            })
+                            .collect(),
                     }),
                     Err(_) => client
                         .app

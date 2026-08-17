@@ -19,6 +19,7 @@ ratatui = { version = "0.30.2", default-features = false }
 crossterm = "0.29.0"
 critical-section = { version = "1.2.0", features = ["std"] }
 gloo-timers = { version = "0.3.0", features = ["futures"] }
+image = { version = "=0.25.8", default-features = false, features = ["jpeg", "png", "webp"] }
 js-sys = "0.3"
 open = "5.3.2"
 ratzilla = "0.3.1"

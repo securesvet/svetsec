@@ -10,7 +10,9 @@ use ratzilla::{
     event::{KeyCode, MouseButton, MouseEventKind},
     ratatui::Terminal,
 };
-use svetsec_core::{App, ArticleContent, ArticleSummary, Effect, Message, SITE_URL, Tab};
+use svetsec_core::{
+    App, ArticleContent, ArticleImage, ArticleSummary, Effect, Message, SITE_URL, Tab,
+};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{Request, RequestCredentials, RequestInit, Response};
@@ -341,10 +343,39 @@ async fn fetch_article(slug: &str) -> Result<ArticleContent, JsValue> {
             .and_then(|value| value.as_string())
             .unwrap_or_default()
     };
+    let image_values = js_sys::Reflect::get(&json, &JsValue::from_str("images"))?;
+    let mut images = Vec::new();
+    for value in js_sys::Array::from(&image_values).iter() {
+        let image_string = |field: &str| {
+            js_sys::Reflect::get(&value, &JsValue::from_str(field))
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default()
+        };
+        let number = |field: &str| {
+            js_sys::Reflect::get(&value, &JsValue::from_str(field))
+                .ok()
+                .and_then(|value| value.as_f64())
+                .unwrap_or_default() as u16
+        };
+        let pixel_values = js_sys::Reflect::get(&value, &JsValue::from_str("pixels"))?;
+        let pixels = js_sys::Array::from(&pixel_values)
+            .iter()
+            .map(|value| value.as_f64().unwrap_or_default() as u8)
+            .collect();
+        images.push(ArticleImage {
+            source: image_string("source"),
+            alt: image_string("alt"),
+            width: number("width"),
+            height: number("height"),
+            pixels,
+        });
+    }
     Ok(ArticleContent {
         slug: string("slug"),
         title: string("title"),
         markdown: string("markdown"),
+        images,
     })
 }
 

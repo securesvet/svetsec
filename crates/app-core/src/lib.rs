@@ -177,10 +177,20 @@ pub struct ArticleSummary {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArticleImage {
+    pub source: String,
+    pub alt: String,
+    pub width: u16,
+    pub height: u16,
+    pub pixels: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArticleContent {
     pub slug: String,
     pub title: String,
     pub markdown: String,
+    pub images: Vec<ArticleImage>,
 }
 
 impl ArticleSummary {
@@ -518,6 +528,7 @@ mod tests {
             slug: "two".into(),
             title: "Two".into(),
             markdown: "# Two".into(),
+            images: Vec::new(),
         });
         assert!(app.opened_article().is_some());
         let _ = app.update(Message::ScrollArticleDown);

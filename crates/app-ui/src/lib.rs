@@ -6,7 +6,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
 };
-use svetsec_core::{App, HelpTarget, Language, Tab};
+use svetsec_core::{App, ArticleImage, HelpTarget, Language, Tab};
 
 const WHITE: Color = Color::Rgb(255, 255, 255);
 const PAPER: Color = Color::Rgb(250, 250, 248);
@@ -282,7 +282,7 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
             Style::new().fg(INK).bold(),
         )));
         lines.push(Line::default());
-        lines.extend(markdown_lines(&article.markdown));
+        lines.extend(markdown_lines(&article.markdown, &article.images));
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
             match app.language() {
@@ -380,7 +380,7 @@ fn skeleton_line(width: u16, row: u8, phase: u8) -> Line<'static> {
     Line::from(spans)
 }
 
-fn markdown_lines(markdown: &str) -> Vec<Line<'static>> {
+fn markdown_lines(markdown: &str, images: &[ArticleImage]) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut code = false;
     let mut front_matter = false;
@@ -394,6 +394,17 @@ fn markdown_lines(markdown: &str) -> Vec<Line<'static>> {
         }
         if raw.trim_start().starts_with("```") {
             code = !code;
+            continue;
+        }
+        if !code && let Some((alt, source)) = markdown_image(raw) {
+            if let Some(image) = images.iter().find(|image| image.source == source) {
+                lines.extend(image_lines(image));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("[image: {alt}]"),
+                    Style::new().fg(MUTED).italic(),
+                )));
+            }
             continue;
         }
         let line = if code {
@@ -426,6 +437,54 @@ fn markdown_lines(markdown: &str) -> Vec<Line<'static>> {
         lines.push(line);
     }
     lines
+}
+
+fn markdown_image(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    let rest = line.strip_prefix("![")?;
+    let (alt, rest) = rest.split_once("](")?;
+    let source = rest.strip_suffix(')')?.trim();
+    (!source.is_empty()).then_some((alt.trim(), source))
+}
+
+fn image_lines(image: &ArticleImage) -> Vec<Line<'static>> {
+    let width = usize::from(image.width);
+    let height = usize::from(image.height);
+    if width == 0
+        || height == 0
+        || image.pixels.len() != width.saturating_mul(height).saturating_mul(3)
+    {
+        return vec![Line::from(Span::styled(
+            format!("[image: {}]", image.alt),
+            Style::new().fg(MUTED).italic(),
+        ))];
+    }
+
+    let color_at = |x: usize, y: usize| {
+        let offset = (y * width + x) * 3;
+        Color::Rgb(
+            image.pixels[offset],
+            image.pixels[offset + 1],
+            image.pixels[offset + 2],
+        )
+    };
+    (0..height)
+        .step_by(2)
+        .map(|y| {
+            let spans = (0..width)
+                .map(|x| {
+                    let top = color_at(x, y);
+                    let bottom = if y + 1 < height {
+                        color_at(x, y + 1)
+                    } else {
+                        PANEL
+                    };
+                    Span::styled("▀", Style::new().fg(top).bg(bottom))
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn render_status_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -681,9 +740,9 @@ fn interpolate(start: Color, end: Color, position: u16, denominator: u16) -> Col
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
-    use svetsec_core::{App, ArticleSummary, Message, Tab};
+    use svetsec_core::{App, ArticleImage, ArticleSummary, Message, Tab};
 
-    use super::{article_at, help_target_at, layout, render, single_line, tab_at};
+    use super::{article_at, help_target_at, layout, markdown_lines, render, single_line, tab_at};
 
     #[test]
     fn desktop_ui_renders_on_the_shared_test_backend() {
@@ -771,5 +830,29 @@ mod tests {
             edit_url: None,
         }]);
         assert_eq!(article_at(Rect::new(0, 0, 80, 24), 5, 7, &app), Some(0));
+    }
+
+    #[test]
+    fn markdown_images_render_as_colored_half_blocks() {
+        let lines = markdown_lines(
+            "![Earth](assets/earth.png)",
+            &[ArticleImage {
+                source: "assets/earth.png".into(),
+                alt: "Earth".into(),
+                width: 1,
+                height: 2,
+                pixels: vec![1, 2, 3, 4, 5, 6],
+            }],
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content, "▀");
+        assert_eq!(
+            lines[0].spans[0].style.fg,
+            Some(ratatui::style::Color::Rgb(1, 2, 3))
+        );
+        assert_eq!(
+            lines[0].spans[0].style.bg,
+            Some(ratatui::style::Color::Rgb(4, 5, 6))
+        );
     }
 }
