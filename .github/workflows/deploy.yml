@@ -39,7 +39,6 @@ jobs:
         with:
           name: svetsec-release
           path: svetsec-release.tar.gz
-          archive: false
           if-no-files-found: error
           retention-days: 7
 
