@@ -62,7 +62,7 @@ jobs:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/svetsec' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
