@@ -38,9 +38,10 @@
 
       html,
       body {
-        width: 100%;
+        width: 100vw;
         min-width: 320px;
-        height: 100%;
+        height: 100vh;
+        height: 100dvh;
         min-height: 100svh;
         margin: 0;
         overflow: hidden;
@@ -50,8 +51,12 @@
 
       #terminal {
         position: fixed;
-        inset: env(safe-area-inset-top) env(safe-area-inset-right)
-          env(safe-area-inset-bottom) env(safe-area-inset-left);
+        top: env(safe-area-inset-top, 0px);
+        right: env(safe-area-inset-right, 0px);
+        bottom: env(safe-area-inset-bottom, 0px);
+        left: env(safe-area-inset-left, 0px);
+        width: auto;
+        height: auto;
         min-width: 0;
         min-height: 0;
         overflow: hidden;
@@ -213,7 +218,7 @@
         background: #1c2a36 !important;
       }
 
-      #mobile-article-controls {
+      #mobile-controls {
         display: none;
       }
 
@@ -226,20 +231,45 @@
       }
 
       @media (max-width: 700px), (pointer: coarse) {
-        #mobile-article-controls.visible {
+        #terminal {
+          bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+          touch-action: none;
+        }
+
+        body[data-mobile-article-open="true"] #terminal {
+          bottom: calc(120px + env(safe-area-inset-bottom, 0px));
+        }
+
+        #mobile-controls {
           position: fixed;
           z-index: 30;
-          right: max(10px, env(safe-area-inset-right));
-          bottom: max(10px, env(safe-area-inset-bottom));
-          left: max(10px, env(safe-area-inset-left));
+          right: max(8px, env(safe-area-inset-right));
+          bottom: max(8px, env(safe-area-inset-bottom));
+          left: max(8px, env(safe-area-inset-left));
           display: grid;
-          grid-template-columns: minmax(0, 1fr) 48px 48px;
           gap: 8px;
           pointer-events: auto;
         }
 
-        #mobile-article-controls button {
-          min-height: 44px;
+        .mobile-article-actions,
+        .mobile-tab-actions {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px;
+        }
+
+        .mobile-article-actions {
+          display: none;
+        }
+
+        body[data-mobile-article-open="true"] .mobile-article-actions {
+          display: grid;
+        }
+
+        #mobile-controls button,
+        #mobile-controls a {
+          min-width: 0;
+          min-height: 48px;
           border: 1px solid #526170;
           border-radius: 14px;
           color: #e6edf3;
@@ -247,10 +277,28 @@
           font: 700 13px/1 "SFMono-Regular", Consolas, "Liberation Mono",
             monospace;
           box-shadow: 0 8px 26px rgb(0 0 0 / 35%);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0 8px;
+          text-align: center;
+          text-decoration: none;
+          white-space: nowrap;
+          overflow: hidden;
+          cursor: pointer;
           touch-action: manipulation;
+          user-select: none;
+          -webkit-user-select: none;
         }
 
-        #mobile-article-controls button:active {
+        #mobile-controls a[aria-current="page"] {
+          border-color: #6da8d3;
+          color: #fff;
+          background: #315d82;
+        }
+
+        #mobile-controls button:active,
+        #mobile-controls a:active {
           background: #315d82;
           transform: translateY(1px);
         }
@@ -269,13 +317,20 @@
       }
     </style>
   </head>
-  <body>
+  <body data-mobile-article-open="false">
     <div id="terminal"></div>
     <div id="article-media-layer" aria-live="polite"></div>
-    <div id="mobile-article-controls" aria-label="Article navigation">
-      <button type="button" data-article-action="back">← Articles</button>
-      <button type="button" data-article-action="up" aria-label="Scroll article up">K ↑</button>
-      <button type="button" data-article-action="down" aria-label="Scroll article down">J ↓</button>
+    <div id="mobile-controls">
+      <div class="mobile-article-actions" aria-label="Article controls">
+        <button type="button" data-article-action="back">← Articles</button>
+        <button type="button" data-article-action="up" aria-label="Scroll article up">K ↑</button>
+        <button type="button" data-article-action="down" aria-label="Scroll article down">J ↓</button>
+      </div>
+      <nav class="mobile-tab-actions" aria-label="Primary mobile navigation">
+        <a href="/" data-mobile-tab="main">Main</a>
+        <a href="/articles" data-mobile-tab="articles">Articles</a>
+        <a href="/info" data-mobile-tab="info">Info</a>
+      </nav>
     </div>
     <main class="semantic-fallback">
       <h1>svetsec.ru</h1>
@@ -287,5 +342,51 @@
       <p>A personal site about security, Rust, and systems.</p>
     </main>
     <noscript>This site needs WebAssembly and JavaScript to display its interactive TUI.</noscript>
+    <script>
+      (() => {
+        const terminal = document.getElementById("terminal");
+        if (!terminal) return;
+
+        let pending = false;
+        const syncTerminalViewport = () => {
+          if (pending) return;
+          pending = true;
+          requestAnimationFrame(() => {
+            pending = false;
+            window.dispatchEvent(new Event("resize"));
+          });
+        };
+
+        // RatZilla measures its cell grid once. Re-run that measurement after
+        // the initial layout/font pass and whenever the visual viewport really
+        // changes (fullscreen, browser chrome, orientation, split view).
+        if ("ResizeObserver" in window) {
+          window.__svetsecResizeObserver = new ResizeObserver(syncTerminalViewport);
+          window.__svetsecResizeObserver.observe(terminal);
+        }
+
+        // The WASM module can finish after the initial timers. Wait for its
+        // grid to appear, then force one measurement against the final layout.
+        if ("MutationObserver" in window) {
+          const gridObserver = new MutationObserver(() => {
+            if (!terminal.querySelector("#terminal_ratzilla_grid")) return;
+            gridObserver.disconnect();
+            syncTerminalViewport();
+          });
+          gridObserver.observe(terminal, { childList: true });
+        }
+
+        window.visualViewport?.addEventListener("resize", syncTerminalViewport);
+        window.addEventListener("pageshow", syncTerminalViewport);
+        document.addEventListener("fullscreenchange", syncTerminalViewport);
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) syncTerminalViewport();
+        });
+        document.fonts?.ready.then(syncTerminalViewport);
+        setTimeout(syncTerminalViewport, 0);
+        setTimeout(syncTerminalViewport, 250);
+        setTimeout(syncTerminalViewport, 1_000);
+      })();
+    </script>
   </body>
 </html>

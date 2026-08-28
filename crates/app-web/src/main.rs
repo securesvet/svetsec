@@ -12,7 +12,8 @@ use svetsec_core::{
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
-    KeyboardEvent, MouseEvent, Request, RequestCredentials, RequestInit, Response, WheelEvent,
+    KeyboardEvent, MouseEvent, PointerEvent, Request, RequestCredentials, RequestInit, Response,
+    WheelEvent,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -291,7 +292,7 @@ fn main() -> io::Result<()> {
                 let _ = sync_browser_code_actions(area, &app);
                 let _ = sync_browser_output_close(area, &app);
                 let _ = sync_browser_images(&app, area, &sync_image_count);
-                let _ = sync_mobile_article_controls(&app);
+                let _ = sync_mobile_controls(&app);
             });
         }
     });
@@ -418,26 +419,45 @@ fn sync_browser_navigation_links(
     Ok(())
 }
 
-fn sync_mobile_article_controls(app: &App) -> Result<(), JsValue> {
+fn sync_mobile_controls(app: &App) -> Result<(), JsValue> {
     let document = web_sys::window()
         .and_then(|window| window.document())
         .ok_or_else(|| JsValue::from_str("document unavailable"))?;
-    let Some(controls) = document.get_element_by_id("mobile-article-controls") else {
+    let Some(controls) = document.get_element_by_id("mobile-controls") else {
         return Ok(());
     };
+    let article_open = app.selected() == Tab::Articles && app.opened_article().is_some();
     controls.set_attribute(
-        "class",
-        if app.selected() == Tab::Articles && app.opened_article().is_some() {
-            "visible"
-        } else {
-            ""
-        },
+        "data-article-open",
+        if article_open { "true" } else { "false" },
     )?;
+    if let Some(body) = document.query_selector("body")? {
+        body.set_attribute(
+            "data-mobile-article-open",
+            if article_open { "true" } else { "false" },
+        )?;
+    }
     if let Some(back) = controls.query_selector("[data-article-action=\"back\"]")? {
         back.set_text_content(Some(match app.language() {
             svetsec_core::Language::En => "← Articles",
             svetsec_core::Language::Ru => "← Статьи",
         }));
+    }
+    for (tab, selector) in [
+        (Tab::Main, "main"),
+        (Tab::Articles, "articles"),
+        (Tab::Info, "info"),
+    ] {
+        let Some(link) = controls.query_selector(&format!("[data-mobile-tab=\"{selector}\"]"))?
+        else {
+            continue;
+        };
+        link.set_text_content(Some(tab.label(app.language())));
+        if app.selected() == tab {
+            link.set_attribute("aria-current", "page")?;
+        } else {
+            link.remove_attribute("aria-current")?;
+        }
     }
     Ok(())
 }
@@ -501,7 +521,7 @@ fn install_browser_events(
         .get_element_by_id("terminal")
         .ok_or_else(|| JsValue::from_str("terminal unavailable"))?;
 
-    if let Some(controls) = document.get_element_by_id("mobile-article-controls") {
+    if let Some(controls) = document.get_element_by_id("mobile-controls") {
         for (action, message) in [
             ("back", Message::CloseArticle),
             ("up", Message::ScrollArticleUp),
@@ -518,6 +538,31 @@ fn install_browser_events(
                 let _ = button_app.borrow_mut().update(message);
             });
             button.add_event_listener_with_callback("click", activate.as_ref().unchecked_ref())?;
+            activate.forget();
+        }
+
+        for (selector, tab) in [
+            ("main", Tab::Main),
+            ("articles", Tab::Articles),
+            ("info", Tab::Info),
+        ] {
+            let Some(link) =
+                controls.query_selector(&format!("[data-mobile-tab=\"{selector}\"]"))?
+            else {
+                continue;
+            };
+            let tab_app = Rc::clone(&app);
+            let activate = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+                event.prevent_default();
+                if tab_app.borrow().opened_article().is_some() {
+                    let _ = tab_app.borrow_mut().update(Message::CloseArticle);
+                }
+                let _ = tab_app.borrow_mut().update(Message::SelectTab(tab));
+                if tab == Tab::Articles {
+                    load_articles(Rc::clone(&tab_app), false);
+                }
+            });
+            link.add_event_listener_with_callback("click", activate.as_ref().unchecked_ref())?;
             activate.forget();
         }
     }
@@ -550,11 +595,14 @@ fn install_browser_events(
     terminal.add_event_listener_with_callback("mousemove", mousemove.as_ref().unchecked_ref())?;
     mousemove.forget();
 
+    let touch_dragged = Rc::new(Cell::new(false));
     let click_app = Rc::clone(&app);
     let click_viewport = Rc::clone(&viewport);
     let click_terminal = terminal.clone();
+    let click_touch_dragged = Rc::clone(&touch_dragged);
     let click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
-        if event.button() != 0 {
+        if event.button() != 0 || click_touch_dragged.replace(false) {
+            event.prevent_default();
             return;
         }
         let area = click_viewport.get();
@@ -563,6 +611,85 @@ fn install_browser_events(
     });
     terminal.add_event_listener_with_callback("click", click.as_ref().unchecked_ref())?;
     click.forget();
+
+    let touch_last_y = Rc::new(Cell::new(None::<f64>));
+    let touch_remainder = Rc::new(Cell::new(0.0_f64));
+    let down_last_y = Rc::clone(&touch_last_y);
+    let down_remainder = Rc::clone(&touch_remainder);
+    let down_dragged = Rc::clone(&touch_dragged);
+    let pointerdown = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
+        if event.pointer_type() != "touch" || !event.is_primary() {
+            return;
+        }
+        down_last_y.set(Some(f64::from(event.client_y())));
+        down_remainder.set(0.0);
+        down_dragged.set(false);
+    });
+    terminal
+        .add_event_listener_with_callback("pointerdown", pointerdown.as_ref().unchecked_ref())?;
+    pointerdown.forget();
+
+    let touch_app = Rc::clone(&app);
+    let touch_viewport = Rc::clone(&viewport);
+    let touch_terminal = terminal.clone();
+    let move_last_y = Rc::clone(&touch_last_y);
+    let move_remainder = Rc::clone(&touch_remainder);
+    let move_dragged = Rc::clone(&touch_dragged);
+    let pointermove = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
+        if event.pointer_type() != "touch" || !event.is_primary() {
+            return;
+        }
+        let current_y = f64::from(event.client_y());
+        let Some(previous_y) = move_last_y.replace(Some(current_y)) else {
+            return;
+        };
+        if touch_app.borrow().selected() != Tab::Articles {
+            return;
+        }
+        event.prevent_default();
+        let area = touch_viewport.get();
+        let terminal_height = touch_terminal.get_bounding_client_rect().height();
+        let delta = wheel_delta_rows(previous_y - current_y, 0, terminal_height, area.height);
+        let pending = move_remainder.get() + delta;
+        let whole_rows = if pending >= 1.0 {
+            pending.floor() as i32
+        } else if pending <= -1.0 {
+            pending.ceil() as i32
+        } else {
+            0
+        };
+        move_remainder.set(pending - f64::from(whole_rows));
+        if whole_rows == 0 {
+            return;
+        }
+        move_dragged.set(true);
+        let opened_article = touch_app.borrow().opened_article().is_some();
+        let message = match (whole_rows.is_positive(), opened_article) {
+            (true, true) => Message::ScrollArticleDown,
+            (false, true) => Message::ScrollArticleUp,
+            (true, false) => Message::NextArticle,
+            (false, false) => Message::PreviousArticle,
+        };
+        for _ in 0..whole_rows.unsigned_abs().min(24) {
+            let _ = touch_app.borrow_mut().update(message);
+        }
+    });
+    terminal
+        .add_event_listener_with_callback("pointermove", pointermove.as_ref().unchecked_ref())?;
+    pointermove.forget();
+
+    let end_last_y = Rc::clone(&touch_last_y);
+    let end_remainder = Rc::clone(&touch_remainder);
+    let pointerend = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
+        if event.pointer_type() == "touch" && event.is_primary() {
+            end_last_y.set(None);
+            end_remainder.set(0.0);
+        }
+    });
+    terminal.add_event_listener_with_callback("pointerup", pointerend.as_ref().unchecked_ref())?;
+    terminal
+        .add_event_listener_with_callback("pointercancel", pointerend.as_ref().unchecked_ref())?;
+    pointerend.forget();
 
     let wheel_app = Rc::clone(&app);
     let wheel_viewport = Rc::clone(&viewport);
