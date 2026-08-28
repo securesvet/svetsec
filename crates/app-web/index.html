@@ -38,18 +38,26 @@
 
       html,
       body {
-        width: 100vw;
-        min-width: 320px;
-        height: 100vh;
-        height: 100dvh;
-        min-height: 100svh;
+        width: 100%;
+        height: 100%;
         margin: 0;
         overflow: hidden;
         background: #070a0e;
         overscroll-behavior: none;
       }
 
+      body {
+        position: fixed;
+        inset: 0;
+        width: auto;
+        height: auto;
+        min-width: 0;
+        min-height: 0;
+      }
+
       #terminal {
+        --terminal-cell-width: 10px;
+        --terminal-cell-height: 20px;
         position: fixed;
         top: env(safe-area-inset-top, 0px);
         right: env(safe-area-inset-right, 0px);
@@ -64,8 +72,9 @@
       }
 
       #terminal_ratzilla_grid {
-        min-width: 100%;
-        min-height: 100%;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
         background: #070a0e;
       }
 
@@ -85,16 +94,13 @@
         image-rendering: auto;
       }
 
-      body {
-        position: fixed;
-        inset: 0;
-      }
-
       #terminal > pre,
       #terminal_ratzilla_grid > pre {
         /* The first selector covers RatZilla's temporary cell-size probe. */
-        font: clamp(12px, 1vw, 16px) / 1.15 "SFMono-Regular", Consolas,
-          "Liberation Mono", monospace;
+        height: var(--terminal-cell-height) !important;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: min(16.6667px, calc(var(--terminal-cell-height) * 0.82));
+        line-height: var(--terminal-cell-height) !important;
       }
 
       #terminal_ratzilla_grid > pre {
@@ -105,6 +111,24 @@
         color: #e6edf3;
         touch-action: manipulation;
         -webkit-tap-highlight-color: transparent;
+      }
+
+      /* RatZilla calculates the Rust buffer using 10×20 px cells. Keep its
+         measured DOM cells aligned with that buffer, including at browser
+         zoom levels where 1ch is no longer close to 10 CSS pixels. */
+      #terminal > pre > span[style*="width: 1ch"],
+      #terminal_ratzilla_grid > pre > span[style*="width: 1ch"] {
+        width: var(--terminal-cell-width) !important;
+      }
+
+      #terminal > pre > span[style*="width: 2ch"],
+      #terminal_ratzilla_grid > pre > span[style*="width: 2ch"] {
+        width: calc(var(--terminal-cell-width) * 2) !important;
+      }
+
+      #terminal > pre > span[style*="width: 0ch"],
+      #terminal_ratzilla_grid > pre > span[style*="width: 0ch"] {
+        width: 0 !important;
       }
 
       #terminal_ratzilla_grid > pre > span {
@@ -236,14 +260,6 @@
         display: none;
       }
 
-      @media (max-width: 480px) {
-        #terminal > pre,
-        #terminal_ratzilla_grid > pre {
-          font-size: clamp(10px, 3vw, 13px);
-          line-height: 1.1;
-        }
-      }
-
       @media (max-width: 700px), (pointer: coarse) {
         #terminal {
           bottom: calc(64px + env(safe-area-inset-bottom, 0px));
@@ -369,45 +385,74 @@
         const terminal = document.getElementById("terminal");
         if (!terminal) return;
 
-        let pending = false;
-        const syncTerminalViewport = () => {
-          if (pending) return;
-          pending = true;
-          requestAnimationFrame(() => {
-            pending = false;
-            window.dispatchEvent(new Event("resize"));
-          });
+        const usesScreenSize = /mobile|tablet/i.test(navigator.userAgent);
+        let lastWidth = -1;
+        let lastHeight = -1;
+
+        const bufferDimensions = () => {
+          const sourceWidth = usesScreenSize
+            ? window.screen.width
+            : window.innerWidth;
+          const sourceHeight = usesScreenSize
+            ? window.screen.height
+            : window.innerHeight;
+          return {
+            columns: Math.max(1, Math.floor(sourceWidth / 10) - 1),
+            rows: Math.max(
+              1,
+              Math.floor(sourceHeight / (usesScreenSize ? 19 : 20)) - 1,
+            ),
+          };
         };
 
-        // RatZilla measures its cell grid once. Re-run that measurement after
-        // the initial layout/font pass and whenever the visual viewport really
-        // changes (fullscreen, browser chrome, orientation, split view).
+        const syncTerminalMetrics = (notifyRenderer = false) => {
+          const bounds = terminal.getBoundingClientRect();
+          if (
+            Math.abs(bounds.width - lastWidth) < 0.5 &&
+            Math.abs(bounds.height - lastHeight) < 0.5
+          ) {
+            return;
+          }
+
+          lastWidth = bounds.width;
+          lastHeight = bounds.height;
+          const { columns, rows } = bufferDimensions();
+          terminal.style.setProperty(
+            "--terminal-cell-width",
+            `${Math.max(1, bounds.width - 0.5) / columns}px`,
+          );
+          terminal.style.setProperty(
+            "--terminal-cell-height",
+            `${Math.max(1, bounds.height - 0.5) / rows}px`,
+          );
+
+          // RatZilla already observes real window resizes. Only synthesize an
+          // event for size changes caused by our mobile controls or safe area.
+          if (notifyRenderer) window.dispatchEvent(new Event("resize"));
+        };
+
+        // Set exact metrics before the WASM module creates its first grid.
+        syncTerminalMetrics();
+
+        // This listener is installed before RatZilla's, so new metrics are in
+        // place before its resize handler rebuilds the grid.
+        window.addEventListener("resize", () => syncTerminalMetrics(), {
+          passive: true,
+        });
+
         if ("ResizeObserver" in window) {
-          window.__svetsecResizeObserver = new ResizeObserver(syncTerminalViewport);
+          window.__svetsecResizeObserver = new ResizeObserver(() =>
+            syncTerminalMetrics(true),
+          );
           window.__svetsecResizeObserver.observe(terminal);
         }
 
-        // The WASM module can finish after the initial timers. Wait for its
-        // grid to appear, then force one measurement against the final layout.
-        if ("MutationObserver" in window) {
-          const gridObserver = new MutationObserver(() => {
-            if (!terminal.querySelector("#terminal_ratzilla_grid")) return;
-            gridObserver.disconnect();
-            syncTerminalViewport();
-          });
-          gridObserver.observe(terminal, { childList: true });
-        }
-
-        window.visualViewport?.addEventListener("resize", syncTerminalViewport);
-        window.addEventListener("pageshow", syncTerminalViewport);
-        document.addEventListener("fullscreenchange", syncTerminalViewport);
-        document.addEventListener("visibilitychange", () => {
-          if (!document.hidden) syncTerminalViewport();
-        });
-        document.fonts?.ready.then(syncTerminalViewport);
-        setTimeout(syncTerminalViewport, 0);
-        setTimeout(syncTerminalViewport, 250);
-        setTimeout(syncTerminalViewport, 1_000);
+        window.visualViewport?.addEventListener("resize", () =>
+          syncTerminalMetrics(true),
+        );
+        document.addEventListener("fullscreenchange", () =>
+          syncTerminalMetrics(true),
+        );
       })();
     </script>
   </body>
