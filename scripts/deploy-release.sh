@@ -8,7 +8,9 @@ release_sha=${2:?release SHA is required}
 [[ "$release_sha" =~ ^[a-f0-9]{40}$ ]]
 
 archive=/tmp/svetsec-image.tar
+caddy_source=/tmp/Caddyfile
 compose_source=/tmp/compose.production.yml
+caddy_target="$deploy_path/Caddyfile"
 compose_target="$deploy_path/compose.production.yml"
 image="svetsec:$release_sha"
 image_state="$deploy_path/current-image"
@@ -27,11 +29,12 @@ if [[ ! -f "$deploy_path/shared/ssh_host_ed25519_key" ]]; then
   echo "missing SSH host key: $deploy_path/shared/ssh_host_ed25519_key" >&2
   exit 1
 fi
-if [[ ! -f "$archive" || ! -f "$compose_source" ]]; then
+if [[ ! -f "$archive" || ! -f "$caddy_source" || ! -f "$compose_source" ]]; then
   echo "missing Docker deployment files in /tmp" >&2
   exit 1
 fi
 
+install -m 0644 "$caddy_source" "$caddy_target"
 install -m 0644 "$compose_source" "$compose_target"
 docker load --input "$archive"
 docker image inspect "$image" >/dev/null
@@ -67,4 +70,4 @@ fi
 printf '%s\n' "$image" > "$image_state.tmp"
 mv "$image_state.tmp" "$image_state"
 
-rm -f "$archive" "$compose_source" /tmp/deploy-release.sh
+rm -f "$archive" "$caddy_source" "$compose_source" /tmp/deploy-release.sh

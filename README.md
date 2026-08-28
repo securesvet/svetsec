@@ -234,9 +234,11 @@ sudo chown -R deploy:deploy /opt/svetsec
 ```
 
 The Compose deployment mounts `shared/` read-only, stores SQLite in
-`$DEPLOY_PATH/data/svetsec.db`, publishes HTTP on host loopback port 3000 for a
-reverse proxy, and publishes SSH on host port 2222. Both host ports can be
-changed in `shared/.env` with `SVETSEC_HTTP_PORT` and `SVETSEC_SSH_PORT`.
+`$DEPLOY_PATH/data/svetsec.db`, and runs Caddy on ports 80 and 443 with automatic
+HTTPS for `svetsec.ru`. The application remains available on host loopback port
+3000 for diagnostics, and its SSH interface is published on host port 2222.
+Both application ports can be changed in `shared/.env` with
+`SVETSEC_HTTP_PORT` and `SVETSEC_SSH_PORT`.
 Inside the container the key paths are fixed to
 `/run/svetsec/owner_ed25519.pub` and
 `/run/svetsec/ssh_host_ed25519_key`, so host-specific absolute key paths are no

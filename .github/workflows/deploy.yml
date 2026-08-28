@@ -20,20 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-      - name: Install build dependencies
-        run: |
-          rustup target add wasm32-unknown-unknown
-          npm ci
-      - name: Verify release
-        run: |
-          cargo test --workspace --locked
-          cargo check --target wasm32-unknown-unknown -p svetsec-web --locked
       - uses: docker/setup-buildx-action@v4
-      - name: Build production image
+      - name: Build and verify production image
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -41,8 +29,8 @@ jobs:
           platforms: ${{ env.DOCKER_PLATFORM }}
           tags: svetsec:${{ github.sha }}
           outputs: type=docker,dest=${{ runner.temp }}/svetsec-image.tar
-          cache-from: type=gha,scope=production-image
-          cache-to: type=gha,mode=max,scope=production-image
+          cache-from: type=gha,scope=production-image,timeout=20m
+          cache-to: type=gha,mode=max,scope=production-image,timeout=20m,ignore-error=true
           provenance: false
       - uses: actions/upload-artifact@v7
         with:
@@ -90,7 +78,7 @@ jobs:
         run: |
           scp -i "$HOME/.ssh/deploy_key" -P "$DEPLOY_PORT" \
             "${{ runner.temp }}/svetsec-image.tar" \
-            compose.production.yml scripts/deploy-release.sh \
+            Caddyfile compose.production.yml scripts/deploy-release.sh \
             "$DEPLOY_USER@$DEPLOY_HOST:/tmp/"
       - name: Activate release
         shell: bash
