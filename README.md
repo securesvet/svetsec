@@ -27,9 +27,11 @@ adds SQLite-backed owner sessions, live owner presence, and articles.
   refresh or Back/Forward navigation preserves the current screen.
 - Every browser click target has pointer and hover feedback: menu tabs, article
   rows, project cards, code actions, and the Python output close button.
-- The browser UI fills the visual viewport, uses a dark palette, and keeps
-  article text selectable. Open articles have a visible Back action plus large
-  touch controls on phones.
+- The browser UI fills the visual viewport and uses a dark palette. Open
+  articles use native browser wheel/touch scrolling, expose a real scrollbar,
+  and constrain text selection to the paragraph or code block where the drag
+  started. They also have a visible Back action plus large touch controls on
+  phones.
 - Markdown images keep their original quality in the browser and use compact
   true-color previews over SSH.
 - Article frontmatter provides colored labels. Python fences from the selected
@@ -160,11 +162,11 @@ Python execution uses `p/з`.
 
 ## Markdown articles from GitHub
 
-Push public articles to `articles/<slug>/en.md` and/or
+Push public articles to both `articles/<slug>/en.md` and
 `articles/<slug>/ru.md` on `main`. The list title is derived from the directory,
 while the selected language file and its `# H1` title are loaded only when a
-visitor opens the article. If that language does not exist, the server falls
-back to the available translation. Files beginning with `_` are ignored; see
+visitor opens the article. A fallback remains available if one translation is
+temporarily absent. Files beginning with `_` are ignored; see
 `articles/_FORMAT.md` for the supported skeleton.
 
 Public repositories need no GitHub token. If the repository becomes private or

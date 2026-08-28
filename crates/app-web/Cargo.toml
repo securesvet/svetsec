@@ -39,7 +39,7 @@ web-sys = { workspace = true, features = [
     "RequestCredentials",
     "RequestInit",
     "Response",
+    "Selection",
     "Storage",
-    "WheelEvent",
     "Window",
 ] }

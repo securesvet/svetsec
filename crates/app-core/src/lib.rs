@@ -247,6 +247,7 @@ pub enum Message {
     OpenSelectedProject,
     SelectArticleCursor(u16),
     SelectArticlePosition { row: u16, column: u16 },
+    SetArticleScroll(u16),
     ScrollArticleDown,
     ScrollArticleUp,
     MoveArticleCursorLeft,
@@ -747,6 +748,7 @@ impl App {
             Message::SelectArticlePosition { row, column } => {
                 self.select_article_position(row, column);
             }
+            Message::SetArticleScroll(row) => self.set_article_scroll(row),
             Message::ScrollArticleDown => self.move_article_cursor(1),
             Message::ScrollArticleUp => self.move_article_cursor(-1),
             Message::MoveArticleCursorLeft => self.move_article_cursor_horizontal(-1),
@@ -857,6 +859,29 @@ impl App {
                 .saturating_sub(1),
         );
         self.ensure_article_cursor_visible();
+    }
+
+    fn set_article_scroll(&mut self, row: u16) {
+        let Some(layout) = self.article_navigation() else {
+            return;
+        };
+        self.article_scroll = row.min(self.article_scroll_limit);
+        let viewport_end = self
+            .article_scroll
+            .saturating_add(self.article_viewport_rows.saturating_sub(1))
+            .min(layout.total_rows.saturating_sub(1));
+        let viewport_start = self
+            .article_scroll
+            .max(layout.cursor_start)
+            .min(layout.total_rows.saturating_sub(1));
+        self.article_cursor = self
+            .article_cursor
+            .clamp(viewport_start, viewport_end.max(viewport_start));
+        self.article_cursor_column = self.article_cursor_column.min(
+            self.article_line_width(self.article_cursor)
+                .saturating_sub(1),
+        );
+        self.article_preferred_column = self.article_cursor_column;
     }
 
     fn move_article_cursor_horizontal(&mut self, delta: i16) {
@@ -1352,6 +1377,31 @@ mod tests {
         assert_eq!(app.article_cursor_column(), 7);
         let _ = app.update(Message::MoveArticleCursorRight);
         assert_eq!(app.article_cursor_column(), 7);
+    }
+
+    #[test]
+    fn native_article_scroll_is_clamped_and_keeps_the_cursor_visible() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "reader".into(),
+            title: "Reader".into(),
+            markdown: (0..20)
+                .map(|index| format!("line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        app.set_article_viewport_rows(5);
+
+        let _ = app.update(Message::SetArticleScroll(8));
+        assert_eq!(app.article_scroll(), 8);
+        assert!((8..13).contains(&app.article_cursor()));
+
+        let _ = app.update(Message::SetArticleScroll(u16::MAX));
+        assert_eq!(app.article_scroll(), app.article_scroll_limit());
+        assert!(app.article_cursor() >= app.article_scroll());
     }
 
     #[test]

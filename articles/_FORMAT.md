@@ -9,9 +9,9 @@ articles/
     ru.md
 ```
 
-An article may contain only one language file. The reader first asks for the
-visitor's selected language and falls back to the other file when that
-translation does not exist.
+Every public article must contain both `en.md` and `ru.md`. The reader asks for
+the visitor's selected language first; the fallback remains in place so an
+article still opens safely while a translation is being prepared.
 
 Optional frontmatter can assign up to six labels:
 

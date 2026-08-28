@@ -11,10 +11,7 @@ use svetsec_core::{
 };
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
-use web_sys::{
-    KeyboardEvent, MouseEvent, PointerEvent, Request, RequestCredentials, RequestInit, Response,
-    WheelEvent,
-};
+use web_sys::{KeyboardEvent, MouseEvent, Request, RequestCredentials, RequestInit, Response};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DomSignature {
@@ -310,6 +307,7 @@ fn main() -> io::Result<()> {
                 let _ = sync_browser_output_close(area, &app);
                 let _ = sync_browser_images(&app, area, &sync_image_count);
                 let _ = sync_mobile_controls(&app);
+                let _ = sync_browser_native_scroll(&app);
                 let _ = sync_browser_text_selection();
             });
         }
@@ -495,6 +493,59 @@ fn sync_mobile_controls(app: &App) -> Result<(), JsValue> {
     Ok(())
 }
 
+fn sync_browser_native_scroll(app: &App) -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let Some(terminal) = document.get_element_by_id("terminal") else {
+        return Ok(());
+    };
+    let article_open = app.selected() == Tab::Articles && app.opened_article().is_some();
+    if !article_open {
+        terminal.remove_attribute("data-native-scroll")?;
+        terminal.set_scroll_top(0);
+        if let Some(spacer) = document.get_element_by_id("web-article-scroll-spacer") {
+            spacer.remove();
+        }
+        return Ok(());
+    }
+
+    terminal.set_attribute("data-native-scroll", "true")?;
+    let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+        return Ok(());
+    };
+    let Some(first_row) = grid.query_selector("pre")? else {
+        return Ok(());
+    };
+    let row_height = first_row.get_bounding_client_rect().height();
+    if row_height <= 0.0 {
+        return Ok(());
+    }
+
+    let spacer = match document.get_element_by_id("web-article-scroll-spacer") {
+        Some(spacer) => spacer,
+        None => {
+            let spacer = document.create_element("div")?;
+            spacer.set_attribute("id", "web-article-scroll-spacer")?;
+            terminal.append_child(&spacer)?;
+            spacer
+        }
+    };
+    spacer.set_attribute(
+        "style",
+        &format!(
+            "height:{}px",
+            f64::from(app.article_scroll_limit()) * row_height
+        ),
+    )?;
+
+    let desired = f64::from(app.article_scroll()) * row_height;
+    if (f64::from(terminal.scroll_top()) - desired).abs() >= 1.0 {
+        terminal.set_scroll_top(desired.round() as i32);
+    }
+    Ok(())
+}
+
 fn sync_browser_output_close(
     area: ratzilla::ratatui::layout::Rect,
     app: &App,
@@ -547,8 +598,21 @@ fn sync_browser_text_selection() -> Result<(), JsValue> {
     let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
         return Ok(());
     };
+    if grid.has_attribute("data-block-selection") {
+        return Ok(());
+    }
     clear_cell_class(&grid, ".web-selectable-text")?;
+    let stale_blocks = grid.query_selector_all("[data-text-block]")?;
+    for index in 0..stale_blocks.length() {
+        if let Some(node) = stale_blocks.item(index)
+            && let Some(element) = node.dyn_ref::<web_sys::Element>()
+        {
+            element.remove_attribute("data-text-block")?;
+        }
+    }
     let rows = grid.query_selector_all("pre")?;
+    let mut next_block = 0_u32;
+    let mut previous_runs = Vec::<(usize, usize, u32)>::new();
     for row_index in 0..rows.length() {
         let Some(row) = rows.item(row_index) else {
             continue;
@@ -557,41 +621,84 @@ fn sync_browser_text_selection() -> Result<(), JsValue> {
             continue;
         };
         let cells = row.query_selector_all("span")?;
-        let mut first = None;
-        let mut last = None;
+        let mut text = Vec::with_capacity(cells.length() as usize);
         for index in 0..cells.length() {
-            let Some(cell) = cells.item(index) else {
-                continue;
-            };
-            if cell
-                .text_content()
-                .as_deref()
-                .is_some_and(cell_contains_selectable_text)
-            {
-                first.get_or_insert(index);
-                last = Some(index);
-            }
+            text.push(
+                cells
+                    .item(index)
+                    .and_then(|cell| cell.text_content())
+                    .unwrap_or_default(),
+            );
         }
-        let (Some(first), Some(last)) = (first, last) else {
+        let runs = selection_runs(&text);
+        if runs.is_empty() {
+            previous_runs.clear();
             continue;
-        };
-        for index in first..=last {
-            let Some(cell) = cells.item(index) else {
-                continue;
-            };
-            let Some(cell) = cell.dyn_ref::<web_sys::Element>() else {
-                continue;
-            };
-            if cell
-                .get_attribute("class")
-                .is_some_and(|class| class.contains("web-"))
-            {
-                continue;
-            }
-            cell.set_attribute("class", "web-selectable-text")?;
         }
+        let mut current_runs = Vec::with_capacity(runs.len());
+        for (start, end) in runs {
+            let block = previous_runs
+                .iter()
+                .find(|(previous_start, previous_end, _)| {
+                    start <= previous_end.saturating_add(2)
+                        && *previous_start <= end.saturating_add(2)
+                })
+                .map_or_else(
+                    || {
+                        let block = next_block;
+                        next_block = next_block.saturating_add(1);
+                        block
+                    },
+                    |(_, _, block)| *block,
+                );
+            for index in start..=end {
+                let Some(cell) = cells.item(index as u32) else {
+                    continue;
+                };
+                let Some(cell) = cell.dyn_ref::<web_sys::Element>() else {
+                    continue;
+                };
+                if cell
+                    .get_attribute("class")
+                    .is_some_and(|class| class.contains("web-"))
+                {
+                    continue;
+                }
+                cell.set_attribute("class", "web-selectable-text")?;
+                cell.set_attribute("data-text-block", &block.to_string())?;
+            }
+            current_runs.push((start, end, block));
+        }
+        previous_runs = current_runs;
     }
     Ok(())
+}
+
+fn selection_runs(cells: &[String]) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    let mut last_text = 0;
+    let mut soft_gap = 0;
+    for (index, cell) in cells.iter().enumerate() {
+        if cell_contains_selectable_text(cell) {
+            if start.is_some() && soft_gap >= 3 {
+                runs.push((start.unwrap_or(index), last_text));
+                start = None;
+            }
+            start.get_or_insert(index);
+            last_text = index;
+            soft_gap = 0;
+        } else if start.is_some() && cell.chars().all(char::is_whitespace) {
+            soft_gap += 1;
+        } else if let Some(start) = start.take() {
+            runs.push((start, last_text));
+            soft_gap = 0;
+        }
+    }
+    if let Some(start) = start {
+        runs.push((start, last_text));
+    }
+    runs
 }
 
 fn cell_contains_selectable_text(text: &str) -> bool {
@@ -600,6 +707,47 @@ fn cell_contains_selectable_text(text: &str) -> bool {
             && !(('\u{2500}'..='\u{257f}').contains(&character))
             && !(('\u{2800}'..='\u{28ff}').contains(&character))
     })
+}
+
+fn activate_browser_text_block(grid: &web_sys::Element, block: &str) -> Result<(), JsValue> {
+    grid.set_attribute("data-block-selection", "true")?;
+    let cells = grid.query_selector_all(".web-selectable-text")?;
+    for index in 0..cells.length() {
+        let Some(node) = cells.item(index) else {
+            continue;
+        };
+        let Some(cell) = node.dyn_ref::<web_sys::Element>() else {
+            continue;
+        };
+        let class = if cell.get_attribute("data-text-block").as_deref() == Some(block) {
+            "web-selectable-text web-selection-active"
+        } else {
+            "web-selectable-text web-selection-muted"
+        };
+        cell.set_attribute("class", class)?;
+    }
+    Ok(())
+}
+
+fn release_browser_text_block(grid: &web_sys::Element) -> Result<(), JsValue> {
+    grid.remove_attribute("data-block-selection")?;
+    let cells = grid.query_selector_all(".web-selection-active, .web-selection-muted")?;
+    for index in 0..cells.length() {
+        let Some(node) = cells.item(index) else {
+            continue;
+        };
+        let Some(cell) = node.dyn_ref::<web_sys::Element>() else {
+            continue;
+        };
+        cell.set_attribute("class", "web-selectable-text")?;
+    }
+    Ok(())
+}
+
+fn browser_has_text_selection() -> bool {
+    web_sys::window()
+        .and_then(|window| window.get_selection().ok().flatten())
+        .is_some_and(|selection| !selection.is_collapsed())
 }
 
 fn install_browser_events(
@@ -615,6 +763,74 @@ fn install_browser_events(
     let terminal = document
         .get_element_by_id("terminal")
         .ok_or_else(|| JsValue::from_str("terminal unavailable"))?;
+
+    let scroll_app = Rc::clone(&app);
+    let scroll_terminal = terminal.clone();
+    let scroll = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+        if scroll_app.borrow().selected() != Tab::Articles
+            || scroll_app.borrow().opened_article().is_none()
+        {
+            return;
+        }
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+            return;
+        };
+        let Ok(Some(first_row)) = grid.query_selector("pre") else {
+            return;
+        };
+        let row_height = first_row.get_bounding_client_rect().height();
+        if row_height <= 0.0 {
+            return;
+        }
+        let row = (f64::from(scroll_terminal.scroll_top().max(0)) / row_height).round() as u16;
+        let _ = scroll_app
+            .borrow_mut()
+            .update(Message::SetArticleScroll(row));
+    });
+    terminal.add_event_listener_with_callback("scroll", scroll.as_ref().unchecked_ref())?;
+    scroll.forget();
+
+    let selection_terminal = terminal.clone();
+    let selection_start = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+        if event.button() != 0 {
+            return;
+        }
+        let Some(target) = event
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+        else {
+            return;
+        };
+        let Some(block) = target.get_attribute("data-text-block") else {
+            return;
+        };
+        let Some(grid) = selection_terminal
+            .query_selector("#terminal_ratzilla_grid")
+            .ok()
+            .flatten()
+        else {
+            return;
+        };
+        let _ = activate_browser_text_block(&grid, &block);
+    });
+    terminal
+        .add_event_listener_with_callback("mousedown", selection_start.as_ref().unchecked_ref())?;
+    selection_start.forget();
+
+    let selection_end = Closure::<dyn FnMut(MouseEvent)>::new(move |_: MouseEvent| {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+            return;
+        };
+        let _ = release_browser_text_block(&grid);
+    });
+    window.add_event_listener_with_callback("mouseup", selection_end.as_ref().unchecked_ref())?;
+    selection_end.forget();
 
     if let Some(controls) = document.get_element_by_id("mobile-controls") {
         for (action, message) in [
@@ -691,14 +907,11 @@ fn install_browser_events(
     terminal.add_event_listener_with_callback("mousemove", mousemove.as_ref().unchecked_ref())?;
     mousemove.forget();
 
-    let touch_dragged = Rc::new(Cell::new(false));
     let click_app = Rc::clone(&app);
     let click_viewport = Rc::clone(&viewport);
     let click_terminal = terminal.clone();
-    let click_touch_dragged = Rc::clone(&touch_dragged);
     let click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
-        if event.button() != 0 || click_touch_dragged.replace(false) {
-            event.prevent_default();
+        if event.button() != 0 || browser_has_text_selection() {
             return;
         }
         let area = click_viewport.get();
@@ -707,130 +920,6 @@ fn install_browser_events(
     });
     terminal.add_event_listener_with_callback("click", click.as_ref().unchecked_ref())?;
     click.forget();
-
-    let touch_last_y = Rc::new(Cell::new(None::<f64>));
-    let touch_remainder = Rc::new(Cell::new(0.0_f64));
-    let down_last_y = Rc::clone(&touch_last_y);
-    let down_remainder = Rc::clone(&touch_remainder);
-    let down_dragged = Rc::clone(&touch_dragged);
-    let pointerdown = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
-        if event.pointer_type() != "touch" || !event.is_primary() {
-            return;
-        }
-        down_last_y.set(Some(f64::from(event.client_y())));
-        down_remainder.set(0.0);
-        down_dragged.set(false);
-    });
-    terminal
-        .add_event_listener_with_callback("pointerdown", pointerdown.as_ref().unchecked_ref())?;
-    pointerdown.forget();
-
-    let touch_app = Rc::clone(&app);
-    let touch_viewport = Rc::clone(&viewport);
-    let touch_terminal = terminal.clone();
-    let move_last_y = Rc::clone(&touch_last_y);
-    let move_remainder = Rc::clone(&touch_remainder);
-    let move_dragged = Rc::clone(&touch_dragged);
-    let pointermove = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
-        if event.pointer_type() != "touch" || !event.is_primary() {
-            return;
-        }
-        let current_y = f64::from(event.client_y());
-        let Some(previous_y) = move_last_y.replace(Some(current_y)) else {
-            return;
-        };
-        if touch_app.borrow().selected() != Tab::Articles {
-            return;
-        }
-        event.prevent_default();
-        let area = touch_viewport.get();
-        let terminal_height = touch_terminal.get_bounding_client_rect().height();
-        let delta = wheel_delta_rows(previous_y - current_y, 0, terminal_height, area.height);
-        let pending = move_remainder.get() + delta;
-        let whole_rows = if pending >= 1.0 {
-            pending.floor() as i32
-        } else if pending <= -1.0 {
-            pending.ceil() as i32
-        } else {
-            0
-        };
-        move_remainder.set(pending - f64::from(whole_rows));
-        if whole_rows == 0 {
-            return;
-        }
-        move_dragged.set(true);
-        let opened_article = touch_app.borrow().opened_article().is_some();
-        let message = match (whole_rows.is_positive(), opened_article) {
-            (true, true) => Message::ScrollArticleDown,
-            (false, true) => Message::ScrollArticleUp,
-            (true, false) => Message::NextArticle,
-            (false, false) => Message::PreviousArticle,
-        };
-        for _ in 0..whole_rows.unsigned_abs().min(24) {
-            let _ = touch_app.borrow_mut().update(message);
-        }
-    });
-    terminal
-        .add_event_listener_with_callback("pointermove", pointermove.as_ref().unchecked_ref())?;
-    pointermove.forget();
-
-    let end_last_y = Rc::clone(&touch_last_y);
-    let end_remainder = Rc::clone(&touch_remainder);
-    let pointerend = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
-        if event.pointer_type() == "touch" && event.is_primary() {
-            end_last_y.set(None);
-            end_remainder.set(0.0);
-        }
-    });
-    terminal.add_event_listener_with_callback("pointerup", pointerend.as_ref().unchecked_ref())?;
-    terminal
-        .add_event_listener_with_callback("pointercancel", pointerend.as_ref().unchecked_ref())?;
-    pointerend.forget();
-
-    let wheel_app = Rc::clone(&app);
-    let wheel_viewport = Rc::clone(&viewport);
-    let wheel_terminal = terminal.clone();
-    let wheel_remainder = Cell::new(0.0_f64);
-    let wheel = Closure::<dyn FnMut(WheelEvent)>::new(move |event: WheelEvent| {
-        if wheel_app.borrow().selected() != Tab::Articles || event.delta_y() == 0.0 {
-            return;
-        }
-        event.prevent_default();
-        let area = wheel_viewport.get();
-        let terminal_height = wheel_terminal.get_bounding_client_rect().height();
-        let delta = wheel_delta_rows(
-            event.delta_y(),
-            event.delta_mode(),
-            terminal_height,
-            area.height,
-        );
-        let previous = wheel_remainder.get();
-        let pending = if previous != 0.0 && previous.signum() != delta.signum() {
-            delta
-        } else {
-            previous + delta
-        };
-        let whole_rows = if pending >= 1.0 {
-            pending.floor() as i32
-        } else if pending <= -1.0 {
-            pending.ceil() as i32
-        } else {
-            0
-        };
-        wheel_remainder.set(pending - f64::from(whole_rows));
-        let opened_article = wheel_app.borrow().opened_article().is_some();
-        let message = match (whole_rows.is_positive(), opened_article) {
-            (true, true) => Message::ScrollArticleDown,
-            (false, true) => Message::ScrollArticleUp,
-            (true, false) => Message::NextArticle,
-            (false, false) => Message::PreviousArticle,
-        };
-        for _ in 0..whole_rows.unsigned_abs().min(24) {
-            let _ = wheel_app.borrow_mut().update(message);
-        }
-    });
-    terminal.add_event_listener_with_callback("wheel", wheel.as_ref().unchecked_ref())?;
-    wheel.forget();
 
     let leave_app = app;
     let mouseleave = Closure::<dyn FnMut(MouseEvent)>::new(move |_: MouseEvent| {
@@ -1046,15 +1135,6 @@ fn grid_axis(offset: f64, extent: f64, cells: u16) -> u16 {
         return 0;
     }
     ((offset.max(0.0) / extent * f64::from(cells)) as u16).min(cells - 1)
-}
-
-fn wheel_delta_rows(delta: f64, mode: u32, terminal_height: f64, rows: u16) -> f64 {
-    match mode {
-        0 if terminal_height > 0.0 && rows > 0 => delta / (terminal_height / f64::from(rows)),
-        1 => delta,
-        2 => delta * f64::from(rows.max(1)),
-        _ => delta,
-    }
 }
 
 fn activate_at(
@@ -1597,7 +1677,7 @@ mod tests {
 
     use super::{
         WebRoute, browser_key_code, cell_contains_selectable_text, grid_axis, grid_cell_axis,
-        wheel_delta_rows,
+        selection_runs,
     };
 
     #[test]
@@ -1619,19 +1699,27 @@ mod tests {
     }
 
     #[test]
-    fn wheel_pixels_are_converted_to_terminal_rows() {
-        assert_eq!(wheel_delta_rows(36.0, 0, 360.0, 20), 2.0);
-        assert_eq!(wheel_delta_rows(-3.0, 1, 360.0, 20), -3.0);
-        assert_eq!(wheel_delta_rows(1.0, 2, 360.0, 20), 20.0);
-    }
-
-    #[test]
     fn selection_ignores_terminal_chrome_and_animation_cells() {
         assert!(cell_contains_selectable_text("Article text"));
         assert!(cell_contains_selectable_text("print(42)"));
         assert!(!cell_contains_selectable_text("   "));
         assert!(!cell_contains_selectable_text("╭────╮"));
         assert!(!cell_contains_selectable_text("⠋⠙⠹"));
+    }
+
+    #[test]
+    fn selection_runs_keep_words_together_and_split_wide_gaps() {
+        let cells = "alpha beta    telemetry"
+            .chars()
+            .map(|character| character.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(selection_runs(&cells), vec![(0, 9), (14, 22)]);
+
+        let cells = ["article", " ", "text", "╭", "status"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(selection_runs(&cells), vec![(0, 2), (4, 4)]);
     }
 
     #[test]

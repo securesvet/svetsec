@@ -78,6 +78,29 @@
         background: #070a0e;
       }
 
+      #terminal[data-native-scroll="true"] {
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior-y: contain;
+        scrollbar-color: #526170 #0d131b;
+        scrollbar-width: thin;
+        touch-action: pan-y;
+      }
+
+      #terminal[data-native-scroll="true"] #terminal_ratzilla_grid {
+        position: sticky;
+        z-index: 1;
+        top: 0;
+        left: 0;
+      }
+
+      #web-article-scroll-spacer {
+        width: 1px;
+        min-height: 0;
+        pointer-events: none;
+        user-select: none;
+      }
+
       #article-media-layer {
         position: fixed;
         inset: 0;
@@ -140,6 +163,11 @@
         cursor: text;
         user-select: text;
         -webkit-user-select: text;
+      }
+
+      #terminal_ratzilla_grid > pre > span.web-selection-muted {
+        user-select: none !important;
+        -webkit-user-select: none !important;
       }
 
       #terminal_ratzilla_grid > pre span::selection {
@@ -406,24 +434,25 @@
         };
 
         const syncTerminalMetrics = (notifyRenderer = false) => {
-          const bounds = terminal.getBoundingClientRect();
+          const width = terminal.clientWidth;
+          const height = terminal.clientHeight;
           if (
-            Math.abs(bounds.width - lastWidth) < 0.5 &&
-            Math.abs(bounds.height - lastHeight) < 0.5
+            Math.abs(width - lastWidth) < 0.5 &&
+            Math.abs(height - lastHeight) < 0.5
           ) {
             return;
           }
 
-          lastWidth = bounds.width;
-          lastHeight = bounds.height;
+          lastWidth = width;
+          lastHeight = height;
           const { columns, rows } = bufferDimensions();
           terminal.style.setProperty(
             "--terminal-cell-width",
-            `${Math.max(1, bounds.width - 0.5) / columns}px`,
+            `${Math.max(1, width - 0.5) / columns}px`,
           );
           terminal.style.setProperty(
             "--terminal-cell-height",
-            `${Math.max(1, bounds.height - 0.5) / rows}px`,
+            `${Math.max(1, height - 0.5) / rows}px`,
           );
 
           // RatZilla already observes real window resizes. Only synthesize an
