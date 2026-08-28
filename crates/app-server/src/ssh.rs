@@ -22,8 +22,7 @@ use russh::{
     server::{Auth, ChannelOpenHandle, Config, Handle, Handler, Msg, Server, Session},
 };
 use svetsec_core::{
-    App, ArticleContent, ArticleImage, ArticleSummary, ArticleVimKey, HelpTarget, Language,
-    Message, Tab,
+    App, ArticleContent, ArticleImage, ArticleSummary, HelpTarget, Language, Message, Tab,
 };
 use tokio::sync::{Mutex, mpsc::UnboundedSender, mpsc::unbounded_channel};
 
@@ -297,10 +296,7 @@ impl Handler for SshServer {
             return Ok(());
         }
 
-        let article_vim_mode = client.app.selected() == Tab::Articles
-            && client.app.opened_article().is_some()
-            && client.app.article_vim_mode();
-        if (!article_vim_mode && (data == b"q" || data == "й".as_bytes())) || data == b"\x03" {
+        if data == b"q" || data == "й".as_bytes() || data == b"\x03" {
             clients.remove(&self.id);
             self.database.remove_presence(&self.presence_id())?;
             session.close(channel)?;
@@ -312,7 +308,6 @@ impl Handler for SshServer {
         let mut python_code = None;
         if client.app.selected() == Tab::Articles {
             let article_open = client.app.opened_article().is_some();
-            let vim_mode = client.app.article_vim_mode();
             if data == b"f" || data == "а".as_bytes() {
                 client.app.begin_articles_load();
                 load_list = true;
@@ -322,10 +317,6 @@ impl Handler for SshServer {
                 && client.app.python_output().is_some()
             {
                 let _ = client.app.update(Message::DismissPythonOutput);
-                return Ok(());
-            }
-            if article_open && !vim_mode && (data == b"i" || data == "ш".as_bytes()) {
-                let _ = client.app.update(Message::EnterArticleVim);
                 return Ok(());
             }
             if article_open
@@ -344,16 +335,6 @@ impl Handler for SshServer {
                 if python_code.is_some() {
                     client.app.begin_python_run();
                 }
-            }
-            if article_open
-                && vim_mode
-                && !run_key
-                && let Some(keys) = ssh_article_vim_keys(data)
-            {
-                for key in keys {
-                    let _ = client.app.update(Message::ArticleVimInput(key));
-                }
-                return Ok(());
             }
             if data == b"\x1b[A" || data == b"k" || data == "л".as_bytes() {
                 let message = if client.app.opened_article().is_some() {
@@ -951,25 +932,6 @@ fn editor_labels(value: &str) -> Result<Vec<String>> {
         anyhow::bail!("Use :labels A,B or :labels to clear labels");
     }
     Ok(labels)
-}
-
-fn ssh_article_vim_keys(data: &[u8]) -> Option<Vec<ArticleVimKey>> {
-    let special = match data {
-        b"\x1b[A" => Some(ArticleVimKey::Up),
-        b"\x1b[B" => Some(ArticleVimKey::Down),
-        b"\x1b[D" => Some(ArticleVimKey::Left),
-        b"\x1b[C" => Some(ArticleVimKey::Right),
-        b"\x1b[H" | b"\x1b[1~" => Some(ArticleVimKey::Home),
-        b"\x1b[F" | b"\x1b[4~" => Some(ArticleVimKey::End),
-        b"\x1b" => Some(ArticleVimKey::Escape),
-        _ => None,
-    };
-    if let Some(key) = special {
-        return Some(vec![key]);
-    }
-    let text = std::str::from_utf8(data).ok()?;
-    let keys = text.chars().map(ArticleVimKey::Char).collect::<Vec<_>>();
-    (!keys.is_empty()).then_some(keys)
 }
 
 fn command_key(character: char) -> char {

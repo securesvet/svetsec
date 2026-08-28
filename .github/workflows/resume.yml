@@ -1,0 +1,52 @@
+name: Build resume PDF
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - resume/**
+      - .github/workflows/resume.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resume-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Install Typst
+        shell: bash
+        run: |
+          curl -fsSL https://github.com/typst/typst/releases/latest/download/typst-x86_64-unknown-linux-musl.tar.xz -o /tmp/typst.tar.xz
+          tar -xJf /tmp/typst.tar.xz -C /tmp
+          sudo install /tmp/typst-x86_64-unknown-linux-musl/typst /usr/local/bin/typst
+          typst --version
+
+      - name: Compile Typst to the web asset
+        run: typst compile --root . resume/resume.typ crates/app-web/assets/resume.pdf
+
+      - name: Commit the generated PDF
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add crates/app-web/assets/resume.pdf
+          git diff --cached --quiet -- crates/app-web/assets/resume.pdf || git commit -m "chore: update generated resume.pdf"
+          git push origin HEAD:${{ github.head_ref || github.ref_name }}
+
+      - name: Upload resume artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: resume-pdf
+          path: crates/app-web/assets/resume.pdf

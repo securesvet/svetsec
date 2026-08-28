@@ -10,22 +10,25 @@ use svetsec_core::{
     App, ArticleImage, DOT_WELL_FRAMES, DOT_WELL_LANGUAGE, DOT_WELL_ROWS, HelpTarget, Language, Tab,
 };
 
-const WHITE: Color = Color::Rgb(255, 255, 255);
-const PAPER: Color = Color::Rgb(250, 250, 248);
-const SOFT_GRAY: Color = Color::Rgb(232, 233, 231);
-const PANEL: Color = Color::Rgb(255, 255, 255);
-const PANEL_ALT: Color = Color::Rgb(245, 246, 244);
-const INK: Color = Color::Rgb(24, 26, 28);
-const GRAPHITE: Color = Color::Rgb(70, 74, 78);
-const MID_GRAY: Color = Color::Rgb(148, 152, 154);
-const BODY: Color = Color::Rgb(54, 58, 61);
-const MUTED: Color = Color::Rgb(105, 109, 112);
-const ONLINE_GREEN: Color = Color::Rgb(26, 166, 90);
-const CODE_KEYWORD: Color = Color::Rgb(102, 72, 190);
-const CODE_STRING: Color = Color::Rgb(34, 116, 108);
-const CODE_NUMBER: Color = Color::Rgb(174, 72, 24);
-const CODE_COMMENT: Color = Color::Rgb(118, 122, 124);
-const CODE_FOCUS: Color = Color::Rgb(235, 239, 246);
+const WHITE: Color = Color::Rgb(247, 251, 255);
+const CANVAS: Color = Color::Rgb(7, 10, 14);
+const PAPER: Color = Color::Rgb(10, 15, 21);
+const SOFT_GRAY: Color = Color::Rgb(28, 42, 54);
+const PANEL: Color = Color::Rgb(13, 19, 27);
+const PANEL_ALT: Color = Color::Rgb(17, 25, 35);
+const INK: Color = Color::Rgb(230, 237, 243);
+const GRAPHITE: Color = Color::Rgb(168, 179, 191);
+const MID_GRAY: Color = Color::Rgb(82, 97, 112);
+const BODY: Color = Color::Rgb(199, 208, 217);
+const MUTED: Color = Color::Rgb(131, 145, 160);
+const CONTROL: Color = Color::Rgb(37, 52, 66);
+const CONTROL_ACTIVE: Color = Color::Rgb(49, 93, 130);
+const ONLINE_GREEN: Color = Color::Rgb(54, 211, 126);
+const CODE_KEYWORD: Color = Color::Rgb(187, 154, 247);
+const CODE_STRING: Color = Color::Rgb(105, 203, 190);
+const CODE_NUMBER: Color = Color::Rgb(244, 162, 97);
+const CODE_COMMENT: Color = Color::Rgb(126, 142, 156);
+const CODE_FOCUS: Color = Color::Rgb(24, 36, 51);
 const MOBILE_BREAKPOINT: u16 = 56;
 
 #[must_use]
@@ -187,6 +190,34 @@ pub fn article_areas(area: Rect, app: &App) -> Vec<(usize, Rect)> {
 }
 
 #[must_use]
+pub fn article_back_area(area: Rect, app: &App) -> Option<Rect> {
+    (app.selected() == Tab::Articles && app.opened_article().is_some()).then(|| {
+        let (panel, compact) = primary_panel_area(area);
+        let horizontal_padding = if compact { 1 } else { 2 };
+        Rect::new(
+            panel.left().saturating_add(1 + horizontal_padding),
+            panel.top().saturating_add(2),
+            10.min(panel.width.saturating_sub(2 + horizontal_padding * 2)),
+            1,
+        )
+    })
+}
+
+#[must_use]
+pub fn resume_link_area(area: Rect, app: &App) -> Option<Rect> {
+    (app.selected() == Tab::Info).then(|| {
+        let (panel, compact) = primary_panel_area(area);
+        let horizontal_padding = if compact { 1 } else { 2 };
+        Rect::new(
+            panel.left().saturating_add(1 + horizontal_padding),
+            panel.top().saturating_add(6),
+            panel.width.saturating_sub(2 + horizontal_padding * 2),
+            1,
+        )
+    })
+}
+
+#[must_use]
 pub fn article_viewport_rows(area: Rect) -> u16 {
     let (_, _, _, _, height) = article_geometry(area);
     height.max(1)
@@ -277,6 +308,19 @@ pub fn code_action_at(area: Rect, column: u16, row: u16, app: &App) -> Option<Co
 }
 
 fn article_geometry(area: Rect) -> (Rect, bool, u16, u16, u16) {
+    let (panel, compact) = primary_panel_area(area);
+    let horizontal_padding = if compact { 1 } else { 2 };
+    let bottom_padding = if compact { 0 } else { 1 };
+    let left = panel.left().saturating_add(1 + horizontal_padding);
+    let top = panel.top().saturating_add(2);
+    let bottom = panel
+        .bottom()
+        .saturating_sub(1)
+        .saturating_sub(bottom_padding);
+    (panel, compact, left, top, bottom.saturating_sub(top))
+}
+
+fn primary_panel_area(area: Rect) -> (Rect, bool) {
     let content = layout(area).content;
     let compact = content.width < 76;
     let panel = if compact {
@@ -289,15 +333,7 @@ fn article_geometry(area: Rect) -> (Rect, bool, u16, u16, u16) {
         ])
         .split(content)[0]
     };
-    let horizontal_padding = if compact { 1 } else { 2 };
-    let bottom_padding = if compact { 0 } else { 1 };
-    let left = panel.left().saturating_add(1 + horizontal_padding);
-    let top = panel.top().saturating_add(2);
-    let bottom = panel
-        .bottom()
-        .saturating_sub(1)
-        .saturating_sub(bottom_padding);
-    (panel, compact, left, top, bottom.saturating_sub(top))
+    (panel, compact)
 }
 
 fn article_content_width(area: Rect) -> u16 {
@@ -324,6 +360,12 @@ pub fn help_target_at(area: Rect, column: u16, row: u16, app: &App) -> Option<He
     }
     if let Some(index) = article_at(area, column, row, app) {
         return Some(HelpTarget::Article(index));
+    }
+    if article_back_area(area, app).is_some_and(|area| area.contains(position)) {
+        return Some(HelpTarget::ArticleBack);
+    }
+    if resume_link_area(area, app).is_some_and(|area| area.contains(position)) {
+        return Some(HelpTarget::Resume);
     }
     if layout.logo.contains(position) {
         return Some(HelpTarget::Logo);
@@ -399,7 +441,7 @@ pub fn native_image_placements<'a>(area: Rect, app: &'a App) -> Vec<ArticleImage
     match app.selected() {
         Tab::Info => app
             .profile_image()
-            .and_then(|image| image_placement(image, content_left, content_top + 6, bounds, true))
+            .and_then(|image| image_placement(image, content_left, content_top + 8, bounds, true))
             .into_iter()
             .collect(),
         Tab::Articles => {
@@ -456,7 +498,7 @@ fn image_placement<'a>(
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
     frame.render_widget(Clear, area);
-    frame.render_widget(Block::new().style(Style::new().bg(WHITE)), area);
+    frame.render_widget(Block::new().style(Style::new().bg(CANVAS)), area);
 
     let layout = layout(area);
     render_header(frame, &layout, app);
@@ -508,10 +550,10 @@ fn render_header(frame: &mut Frame<'_>, layout: &UiLayout, app: &App) {
 
         match (tab == app.selected(), hovered) {
             (true, true) => {
-                paint_horizontal_background(frame.buffer_mut(), tab_area, GRAPHITE, MID_GRAY);
+                paint_horizontal_background(frame.buffer_mut(), tab_area, CONTROL_ACTIVE, CONTROL);
             }
             (true, false) => {
-                paint_horizontal_background(frame.buffer_mut(), tab_area, INK, GRAPHITE);
+                paint_horizontal_background(frame.buffer_mut(), tab_area, CONTROL_ACTIVE, CONTROL);
             }
             (false, true) => {
                 paint_horizontal_background(frame.buffer_mut(), tab_area, SOFT_GRAY, PANEL_ALT);
@@ -614,17 +656,36 @@ fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: b
             Style::new().fg(INK).add_modifier(Modifier::BOLD),
         )),
         Line::default(),
-        Line::from(Span::styled(
-            app.selected().description(app.language()),
-            Style::new().fg(BODY),
-        )),
-        Line::default(),
     ];
     if app.selected() == Tab::Info {
+        content.push(Line::from(vec![
+            Span::styled(
+                match app.language() {
+                    Language::En => "Resume PDF  ",
+                    Language::Ru => "Резюме PDF  ",
+                },
+                Style::new().fg(INK).bold(),
+            ),
+            Span::styled(
+                "https://svetsec.ru/assets/resume.pdf",
+                Style::new().fg(Color::Rgb(143, 199, 242)).underlined(),
+            ),
+        ]));
+        content.push(Line::default());
+        content.push(Line::from(Span::styled(
+            app.selected().description(app.language()),
+            Style::new().fg(BODY),
+        )));
+        content.push(Line::default());
         if let Some(image) = app.profile_image() {
             content.extend(image_lines(image));
         }
     } else {
+        content.push(Line::from(Span::styled(
+            app.selected().description(app.language()),
+            Style::new().fg(BODY),
+        )));
+        content.push(Line::default());
         content.push(Line::from(vec![
             Span::styled("SIGNAL  ", Style::new().fg(MUTED)),
             Span::styled("▁▂▃▅▇█▇▆▄▃▅▆", Style::new().fg(GRAPHITE)),
@@ -652,10 +713,33 @@ fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: b
 
 fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     frame.render_widget(Block::new().style(Style::new().bg(PANEL)), area);
-    let mut lines = vec![Line::from(vec![
-        Span::styled("● SYNC", Style::new().fg(INK).bold()),
-        Span::styled("  //  GITHUB main/articles", Style::new().fg(MUTED)),
-    ])];
+    let mut lines = vec![if app.opened_article().is_some() {
+        Line::from(vec![
+            Span::styled(
+                match (
+                    app.language(),
+                    app.hovered() == Some(HelpTarget::ArticleBack),
+                ) {
+                    (Language::En, false) => "← Back",
+                    (Language::En, true) => "← BACK",
+                    (Language::Ru, false) => "← Назад",
+                    (Language::Ru, true) => "← НАЗАД",
+                },
+                Style::new()
+                    .fg(Color::Rgb(143, 199, 242))
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
+            Span::styled(
+                "   ● SYNC  //  GITHUB main/articles",
+                Style::new().fg(MUTED),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("● SYNC", Style::new().fg(INK).bold()),
+            Span::styled("  //  GITHUB main/articles", Style::new().fg(MUTED)),
+        ])
+    }];
 
     if app.articles_loading() || app.article_loading() {
         lines.push(Line::default());
@@ -708,69 +792,28 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
             app.hovered(),
         ));
         lines.push(Line::default());
-        let controls = match (
-            app.language(),
-            app.article_vim_mode(),
-            app.focused_code_block(),
-        ) {
-            (Language::En, false, Some(block)) if block.executable() => {
-                "j/k scroll · p run · c copy · i Vim · Esc back"
+        let controls = match (app.language(), app.focused_code_block()) {
+            (Language::En, Some(block)) if block.executable() => {
+                "j/k scroll · p run · c copy · Esc back"
             }
-            (Language::Ru, false, Some(block)) if block.executable() => {
-                "о/л скролл · з запуск · с копировать · ш Vim · Esc назад"
+            (Language::Ru, Some(block)) if block.executable() => {
+                "о/л скролл · з запуск · с копировать · Esc назад"
             }
-            (Language::En, false, Some(block)) if !block.animated() => {
-                "j/k scroll · c copy · i Vim · Esc back"
+            (Language::En, Some(block)) if !block.animated() => "j/k scroll · c copy · Esc back",
+            (Language::Ru, Some(block)) if !block.animated() => {
+                "о/л скролл · с копировать · Esc назад"
             }
-            (Language::Ru, false, Some(block)) if !block.animated() => {
-                "о/л скролл · с копировать · ш Vim · Esc назад"
-            }
-            (Language::En, false, _) => "j/k scroll · i enter Vim · Esc back",
-            (Language::Ru, false, _) => "о/л скролл · ш включить Vim · Esc назад",
-            (Language::En, true, Some(block)) if block.executable() => {
-                "h/j/k/l move · p run · c copy · Esc view"
-            }
-            (Language::Ru, true, Some(block)) if block.executable() => {
-                "р/о/л/д курсор · з запуск · с копировать · Esc просмотр"
-            }
-            (Language::En, true, Some(block)) if block.animated() => {
-                "h/j/k/l explore animation · Esc view"
-            }
-            (Language::Ru, true, Some(block)) if block.animated() => {
-                "р/о/л/д исследовать анимацию · Esc просмотр"
-            }
-            (Language::En, true, Some(_)) => "h/j/k/l move · c copy · Esc view",
-            (Language::Ru, true, Some(_)) => "р/о/л/д курсор · с копировать · Esc просмотр",
-            (Language::En, true, None) => "h/j/k/l · 0/$ · gg/G · Esc view",
-            (Language::Ru, true, None) => "р/о/л/д · 0/$ · пп/G · Esc просмотр",
-        };
-        let mode = if app.article_vim_mode() && app.article_vim_count() > 0 {
-            format!("{} {}", app.article_vim_status(), app.article_vim_count())
-        } else if app.article_vim_mode() {
-            app.article_vim_status().to_owned()
-        } else {
-            "VIEW".to_owned()
+            (Language::En, _) => "j/k or arrows scroll · Esc back",
+            (Language::Ru, _) => "о/л или стрелки — скролл · Esc назад",
         };
         lines.push(Line::from(Span::styled(
             format!(
-                "-- {mode} --  {}:{}  {controls}",
+                "-- READ --  {}/{}  {controls}",
                 app.article_cursor() + 1,
-                app.article_cursor_column() + 1
+                app.article_total_rows().max(1)
             ),
             Style::new().fg(MUTED),
         )));
-        if app.article_vim_mode() {
-            for selection in app.article_vim_selection() {
-                if let Some(line) = lines.get_mut(usize::from(selection.row)) {
-                    apply_vim_selection(line, selection.start_column, selection.end_column);
-                }
-            }
-            apply_article_cursor(
-                &mut lines,
-                app.article_cursor(),
-                app.article_cursor_column(),
-            );
-        }
     } else if let Some(error) = app.articles_error() {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
@@ -799,7 +842,7 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
                 Span::styled(
                     article.title(app.language()).to_owned(),
                     if selected {
-                        Style::new().fg(WHITE).bg(INK).bold()
+                        Style::new().fg(WHITE).bg(CONTROL_ACTIVE).bold()
                     } else if hovered {
                         Style::new().fg(INK).bg(SOFT_GRAY).bold()
                     } else {
@@ -1447,95 +1490,6 @@ fn code_keyword(language: &str, word: &str) -> bool {
     }
 }
 
-fn apply_article_cursor(lines: &mut [Line<'static>], cursor: u16, column: u16) {
-    if let Some(line) = lines.get_mut(usize::from(cursor)) {
-        apply_vim_cursor(line, column);
-    }
-}
-
-fn apply_vim_selection(line: &mut Line<'static>, start: u16, end: u16) {
-    if start >= end {
-        return;
-    }
-    let mut column = 0_usize;
-    let start = usize::from(start);
-    let end = usize::from(end);
-    let mut selected = Vec::new();
-    for span in std::mem::take(&mut line.spans) {
-        let content = span.content.to_string();
-        let length = content.chars().count();
-        let span_start = column;
-        let span_end = column.saturating_add(length);
-        let selection_start = start.max(span_start).min(span_end);
-        let selection_end = end.max(span_start).min(span_end);
-        if selection_start >= selection_end {
-            selected.push(span);
-        } else {
-            let before = content
-                .chars()
-                .take(selection_start - span_start)
-                .collect::<String>();
-            let middle = content
-                .chars()
-                .skip(selection_start - span_start)
-                .take(selection_end - selection_start)
-                .collect::<String>();
-            let after = content
-                .chars()
-                .skip(selection_end - span_start)
-                .collect::<String>();
-            if !before.is_empty() {
-                selected.push(Span::styled(before, span.style));
-            }
-            if !middle.is_empty() {
-                selected.push(Span::styled(
-                    middle,
-                    span.style.patch(Style::new().bg(SOFT_GRAY).bold()),
-                ));
-            }
-            if !after.is_empty() {
-                selected.push(Span::styled(after, span.style));
-            }
-        }
-        column = span_end;
-    }
-    line.spans = selected;
-}
-
-fn apply_vim_cursor(line: &mut Line<'static>, column: u16) {
-    let mut remaining = usize::from(column);
-    for index in 0..line.spans.len() {
-        let content = line.spans[index].content.to_string();
-        let length = content.chars().count();
-        if remaining >= length {
-            remaining -= length;
-            continue;
-        }
-        let style = line.spans[index].style;
-        let before = content.chars().take(remaining).collect::<String>();
-        let current = content
-            .chars()
-            .nth(remaining)
-            .map_or_else(|| " ".to_owned(), |character| character.to_string());
-        let after = content.chars().skip(remaining + 1).collect::<String>();
-        let mut replacement = Vec::with_capacity(3);
-        if !before.is_empty() {
-            replacement.push(Span::styled(before, style));
-        }
-        replacement.push(Span::styled(
-            current,
-            style.patch(Style::new().fg(WHITE).bg(INK).bold()),
-        ));
-        if !after.is_empty() {
-            replacement.push(Span::styled(after, style));
-        }
-        line.spans.splice(index..=index, replacement);
-        return;
-    }
-    line.spans
-        .push(Span::styled(" ", Style::new().fg(WHITE).bg(INK).bold()));
-}
-
 fn markdown_image(line: &str) -> Option<(&str, &str)> {
     let line = line.trim();
     let rest = line.strip_prefix("![")?;
@@ -1765,11 +1719,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(if app.opened_article().is_some() {
-                    if app.article_vim_mode() {
-                        "NORMAL RO  h/j/k/l  •  0/$  •  gg/G"
-                    } else {
-                        "VIEW  •  i enter Vim  •  Esc back"
-                    }
+                    "READ  •  j/k scroll  •  Esc back"
                 } else {
                     "←/→ tabs  •  1–3 jump"
                 })
@@ -1787,39 +1737,24 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     }
 
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
-    let navigation = if app.opened_article().is_some() && app.article_vim_mode() {
+    let navigation = if app.opened_article().is_some() {
         Line::from(vec![
-            Span::styled(" NORMAL RO ", Style::new().fg(WHITE).bg(INK).bold()),
-            Span::styled(" h j k l   ", Style::new().fg(BODY)),
-            Span::styled(" LINE ", Style::new().fg(WHITE).bg(GRAPHITE).bold()),
-            Span::styled(" 0 $   ", Style::new().fg(BODY)),
-            Span::styled(" RUN ", Style::new().fg(WHITE).bg(MID_GRAY).bold()),
-            Span::styled(" p   ", Style::new().fg(BODY)),
-            Span::styled(" COPY ", Style::new().fg(WHITE).bg(GRAPHITE).bold()),
-            Span::styled(" c   ", Style::new().fg(BODY)),
-            Span::styled(" NORMAL ", Style::new().fg(MUTED)),
-            Span::styled(" Esc   ", Style::new().fg(BODY)),
-            Span::styled(" TOP/BOTTOM ", Style::new().fg(MUTED)),
-            Span::styled(" gg/G ", Style::new().fg(BODY)),
-        ])
-    } else if app.opened_article().is_some() {
-        Line::from(vec![
-            Span::styled(" VIEW ", Style::new().fg(WHITE).bg(INK).bold()),
-            Span::styled(" i enter Vim   ", Style::new().fg(BODY)),
-            Span::styled(" BACK ", Style::new().fg(WHITE).bg(GRAPHITE).bold()),
+            Span::styled(" READ ", Style::new().fg(WHITE).bg(CONTROL_ACTIVE).bold()),
+            Span::styled(" j/k or ↑/↓ scroll   ", Style::new().fg(BODY)),
+            Span::styled(" BACK ", Style::new().fg(WHITE).bg(CONTROL).bold()),
             Span::styled(" Esc ", Style::new().fg(BODY)),
         ])
     } else {
         Line::from(vec![
-            Span::styled(" NAV ", Style::new().fg(WHITE).bg(INK).bold()),
+            Span::styled(" NAV ", Style::new().fg(WHITE).bg(CONTROL_ACTIVE).bold()),
             Span::styled(" ← → / h l   ", Style::new().fg(BODY)),
-            Span::styled(" TABS ", Style::new().fg(WHITE).bg(GRAPHITE).bold()),
+            Span::styled(" TABS ", Style::new().fg(WHITE).bg(CONTROL).bold()),
             Span::styled(" 1 2 3   ", Style::new().fg(BODY)),
-            Span::styled(" OPEN ", Style::new().fg(WHITE).bg(MID_GRAY).bold()),
+            Span::styled(" OPEN ", Style::new().fg(WHITE).bg(CONTROL).bold()),
             Span::styled(" g x   ", Style::new().fg(BODY)),
             Span::styled(" QUIT ", Style::new().fg(MUTED)),
             Span::styled(" q   ", Style::new().fg(BODY)),
-            Span::styled(" LANG ", Style::new().fg(WHITE).bg(GRAPHITE).bold()),
+            Span::styled(" LANG ", Style::new().fg(WHITE).bg(CONTROL).bold()),
             Span::styled(" r   ", Style::new().fg(BODY)),
             Span::styled(
                 if app.authenticated() {
@@ -1827,7 +1762,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
                 } else {
                     " AUTH "
                 },
-                Style::new().fg(WHITE).bg(MID_GRAY).bold(),
+                Style::new().fg(WHITE).bg(CONTROL).bold(),
             ),
             Span::styled(
                 if app.authenticated() { " e" } else { " a" },
@@ -1984,10 +1919,11 @@ mod tests {
     use svetsec_core::{App, ArticleContent, ArticleImage, ArticleSummary, Message, Tab};
 
     use super::{
-        CodeBlockAction, article_at, article_cursor_at, article_viewport_rows, code_action_areas,
-        code_action_at, help_target_at, label_color, layout, markdown_image_offsets,
-        markdown_lines, markdown_lines_with_focus, native_image_placements, python_output_area,
-        python_output_close_area, render, single_line, tab_at,
+        CodeBlockAction, article_at, article_back_area, article_cursor_at, article_viewport_rows,
+        code_action_areas, code_action_at, help_target_at, label_color, layout,
+        markdown_image_offsets, markdown_lines, markdown_lines_with_focus, native_image_placements,
+        python_output_area, python_output_close_area, render, resume_link_area, single_line,
+        tab_at,
     };
 
     #[test]
@@ -2094,6 +2030,33 @@ mod tests {
             labels: Vec::new(),
         }]);
         assert_eq!(article_at(Rect::new(0, 0, 80, 24), 5, 7, &app), Some(0));
+    }
+
+    #[test]
+    fn back_and_resume_are_visible_mouse_targets_on_phone_layouts() {
+        let area = Rect::new(0, 0, 36, 20);
+        let mut article_app = App::default();
+        let _ = article_app.update(Message::SelectTab(Tab::Articles));
+        article_app.set_opened_article(ArticleContent {
+            slug: "one".into(),
+            title: "One".into(),
+            markdown: "Text".into(),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        let back = article_back_area(area, &article_app).expect("back target");
+        assert_eq!(
+            help_target_at(area, back.left(), back.top(), &article_app),
+            Some(svetsec_core::HelpTarget::ArticleBack)
+        );
+
+        let mut info_app = App::default();
+        let _ = info_app.update(Message::SelectTab(Tab::Info));
+        let resume = resume_link_area(area, &info_app).expect("resume target");
+        assert_eq!(
+            help_target_at(area, resume.left(), resume.top(), &info_app),
+            Some(svetsec_core::HelpTarget::Resume)
+        );
     }
 
     #[test]
@@ -2266,30 +2229,6 @@ mod tests {
                 .iter()
                 .all(|span| span.style.bg == Some(super::CODE_FOCUS))
         );
-    }
-
-    #[test]
-    fn vim_cursor_highlights_one_character_instead_of_the_whole_line() {
-        let mut lines = vec![ratatui::text::Line::from(ratatui::text::Span::styled(
-            "abcdef",
-            ratatui::style::Style::new().fg(super::BODY),
-        ))];
-        super::apply_article_cursor(&mut lines, 0, 3);
-        assert_eq!(
-            lines[0]
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>(),
-            "abcdef"
-        );
-        let cursor_cells = lines[0]
-            .spans
-            .iter()
-            .filter(|span| span.style.bg == Some(super::INK))
-            .collect::<Vec<_>>();
-        assert_eq!(cursor_cells.len(), 1);
-        assert_eq!(cursor_cells[0].content, "d");
     }
 
     #[test]

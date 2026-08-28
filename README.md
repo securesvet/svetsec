@@ -17,7 +17,7 @@ adds SQLite-backed owner sessions, live owner presence, and articles.
   token is stored in SQLite.
 - SSH identifies the owner by username plus a verified public key. Other
   usernames get a read-only guest session.
-- The owner can open Articles and press `e` over SSH to enter the Vim-like
+- The owner can open Articles and press `e` over SSH to enter the terminal
   editor. Article writes are enforced server-side.
 - Published Markdown is discovered from `main/articles` through the server.
   The directory list loads first; a language file body is fetched only when
@@ -27,6 +27,9 @@ adds SQLite-backed owner sessions, live owner presence, and articles.
   refresh or Back/Forward navigation preserves the current screen.
 - Every browser click target has pointer and hover feedback: menu tabs, article
   rows, code actions, and the Python output close button.
+- The browser UI fills the visual viewport, uses a dark palette, and keeps
+  article text selectable. Open articles have a visible Back action plus large
+  touch controls on phones.
 - Markdown images keep their original quality in the browser and use compact
   true-color previews over SSH.
 - Article frontmatter provides colored labels. Python fences from the selected
@@ -35,6 +38,9 @@ adds SQLite-backed owner sessions, live owner presence, and articles.
   panel and remains there until `x` (or its close button) is used.
   Label matching is case-insensitive; unknown labels keep a deterministic
   palette color.
+- Info links to the generated PDF resume. Its Typst source lives in
+  `resume/resume.typ`; `.github/workflows/resume.yml` rebuilds and commits the
+  web asset when that source changes.
 
 ## Requirements
 
@@ -109,19 +115,14 @@ Browser shortcuts (article navigation keys are shared with SSH):
 - `Left`/`Right`, `h`/`l`, or `1`–`3`: sections
 - `r`: switch language
 - `a`: owner password login
-- `j`/`k` or arrows: select an article
+- `j`/`k` or arrows: select an article, or scroll the open article
 - `Enter`/`o`: open the selected Markdown article
 - `e`: edit the selected article on GitHub; creates one if the list is empty
 - `n`: create a new Markdown article on GitHub
 - `f`: refresh the filename list after a GitHub commit
-- `i`: enter the article's read-only Vim Normal mode
-- `p`: in Vim mode, run the focused committed `python`/`python3`/`py` fence
-  through Pyodide
-- `h`/`j`/`k`/`l` or arrows: move the read-only Vim cursor inside an article
-- `0`/`$` or `Home`/`End`: jump to the start/end of the rendered line
-- `gg`/`G`: jump to the beginning/end of the rendered document
-- `c`: in Vim mode, copy the focused code block (`OSC 52` is used over SSH)
-- `Esc`: leave Vim mode; from View mode, close the article
+- `p`: run the focused committed `python`/`python3`/`py` fence through Pyodide
+- `c`: copy the focused code block (`OSC 52` is used over SSH)
+- `Esc` or the visible Back control: close the article
 - `x`: close the Python output panel
 - Mouse/touch: sections
 - Mouse hover on desktop: contextual single-line hints
@@ -142,7 +143,7 @@ In the owner session, open Articles (`2`) and press `e`. Editor commands:
 
 - `i`, `a`, `o`: enter Insert mode
 - `Esc`: return to Normal mode
-- `h`, `j`, `k`, `l`, `x`: Vim-style movement/deletion
+- `h`, `j`, `k`, `l`, `x`: cursor movement/deletion
 - `:title TEXT`, `:slug SLUG`: edit metadata
 - `:labels cryptography, python`: set frontmatter labels (`:labels` clears them)
 - `:lang en` / `:lang ru`: switch the article language buffer
@@ -260,5 +261,6 @@ crates/app-core      shared state, localization, and messages
 crates/app-ui        shared Ratatui rendering and hit-testing
 crates/app-terminal  native local Crossterm loop
 crates/app-web       Ratzilla/WebAssembly adapter and API polling
-crates/app-server    Axum HTTP, SQLite, SSH, presence, and Vim-like editor
+crates/app-server    Axum HTTP, SQLite, SSH, presence, and owner editor
+resume               Typst source for the PDF linked from Info
 ```

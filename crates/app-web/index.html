@@ -10,7 +10,7 @@
       name="description"
       content="svetsec.ru — a personal site about security, Rust, and systems."
     />
-    <meta name="theme-color" content="#ffffff" />
+    <meta name="theme-color" content="#070a0e" />
     <link data-trunk rel="rust" data-no-minify />
     <link
       data-trunk
@@ -18,12 +18,18 @@
       href="assets/profile.jpg"
       data-target-path="assets"
     />
+    <link
+      data-trunk
+      rel="copy-file"
+      href="assets/resume.pdf"
+      data-target-path="assets"
+    />
     <title>svetsec.ru</title>
     <style>
       :root {
-        color-scheme: light;
+        color-scheme: dark;
         font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        background: #fff;
+        background: #070a0e;
       }
 
       * {
@@ -34,17 +40,28 @@
       body {
         width: 100%;
         min-width: 320px;
-        height: 100dvh;
+        height: 100%;
+        min-height: 100svh;
         margin: 0;
         overflow: hidden;
-        background: #fff;
+        background: #070a0e;
+        overscroll-behavior: none;
       }
 
       #terminal {
-        width: 100%;
-        height: 100%;
+        position: fixed;
+        inset: env(safe-area-inset-top) env(safe-area-inset-right)
+          env(safe-area-inset-bottom) env(safe-area-inset-left);
         min-width: 0;
         min-height: 0;
+        overflow: hidden;
+        background: #070a0e;
+      }
+
+      #terminal_ratzilla_grid {
+        min-width: 100%;
+        min-height: 100%;
+        background: #070a0e;
       }
 
       #article-media-layer {
@@ -59,39 +76,46 @@
         position: fixed;
         object-fit: contain;
         object-position: left top;
-        background: #fff;
+        background: #0d131b;
         image-rendering: auto;
       }
 
       body {
-        display: flex;
-        align-items: stretch;
-        justify-content: stretch;
-        padding: env(safe-area-inset-top) env(safe-area-inset-right)
-          env(safe-area-inset-bottom) env(safe-area-inset-left);
+        position: fixed;
+        inset: 0;
       }
 
-      pre {
-        width: 100%;
-        height: 100%;
-        margin: 0;
-        overflow: hidden;
-        /* RatZilla's viewport uses 10×20 px cells. Keeping the measured glyph
-           below that bound prevents its render buffer from outgrowing the DOM
-           grid on wide/fullscreen displays. */
+      #terminal > pre,
+      #terminal_ratzilla_grid > pre {
+        /* The first selector covers RatZilla's temporary cell-size probe. */
         font: clamp(12px, 1vw, 16px) / 1.15 "SFMono-Regular", Consolas,
           "Liberation Mono", monospace;
+      }
+
+      #terminal_ratzilla_grid > pre {
+        width: 100%;
+        margin: 0;
+        overflow: hidden;
         outline: none;
-        color: #181a1c;
+        color: #e6edf3;
         touch-action: manipulation;
-        user-select: none;
+        user-select: text;
+        -webkit-user-select: text;
         -webkit-tap-highlight-color: transparent;
       }
 
+      #terminal_ratzilla_grid > pre::selection,
+      #terminal_ratzilla_grid > pre span::selection {
+        color: #f7fbff;
+        background: #315d82;
+      }
+
       .web-tab-cell {
-        background: #f5f6f4 !important;
-        color: #696d70 !important;
+        background: #111923 !important;
+        color: #8e9baa !important;
         cursor: pointer;
+        user-select: none;
+        -webkit-user-select: none;
         transition:
           background-color 140ms ease,
           color 140ms ease,
@@ -99,19 +123,19 @@
       }
 
       .web-tab-hovered {
-        background: #e8e9e7 !important;
-        color: #181a1c !important;
-        filter: brightness(0.98);
+        background: #1c2a36 !important;
+        color: #e6edf3 !important;
+        filter: brightness(1.08);
       }
 
       .web-tab-selected {
-        background: #181a1c !important;
+        background: #315d82 !important;
         color: #fff !important;
         font-weight: 700;
       }
 
       .web-tab-selected.web-tab-hovered {
-        background: #464a4e !important;
+        background: #3c709b !important;
       }
 
       .web-tab-start {
@@ -125,6 +149,8 @@
       .web-code-action {
         color: #fff !important;
         cursor: pointer;
+        user-select: none;
+        -webkit-user-select: none;
         font-weight: 700;
         transition:
           background-color 120ms ease,
@@ -132,16 +158,16 @@
       }
 
       .web-code-run {
-        background: #181a1c !important;
+        background: #315d82 !important;
       }
 
       .web-code-copy {
-        background: #464a4e !important;
+        background: #253442 !important;
       }
 
       .web-code-run:hover,
       .web-code-copy:hover {
-        background: #6650a4 !important;
+        background: #3c709b !important;
         filter: brightness(1.08);
       }
 
@@ -155,6 +181,8 @@
 
       .web-clickable {
         cursor: pointer;
+        user-select: none;
+        -webkit-user-select: none;
         transition:
           background-color 120ms ease,
           color 120ms ease,
@@ -162,20 +190,69 @@
       }
 
       .web-article-link:hover {
-        background: #e8e9e7 !important;
-        color: #181a1c !important;
-        filter: brightness(0.98);
+        background: #1c2a36 !important;
+        color: #e6edf3 !important;
+        filter: brightness(1.08);
       }
 
       .web-output-close:hover {
-        background: #6650a4 !important;
+        background: #3c709b !important;
         color: #fff !important;
       }
 
+      .web-back-link,
+      .web-resume-link {
+        color: #8fc7f2 !important;
+        text-decoration: underline;
+        text-underline-offset: 0.18em;
+      }
+
+      .web-back-link:hover,
+      .web-resume-link:hover {
+        color: #d8eeff !important;
+        background: #1c2a36 !important;
+      }
+
+      #mobile-article-controls {
+        display: none;
+      }
+
       @media (max-width: 480px) {
-        pre {
+        #terminal > pre,
+        #terminal_ratzilla_grid > pre {
           font-size: clamp(10px, 3vw, 13px);
           line-height: 1.1;
+        }
+      }
+
+      @media (max-width: 700px), (pointer: coarse) {
+        #mobile-article-controls.visible {
+          position: fixed;
+          z-index: 30;
+          right: max(10px, env(safe-area-inset-right));
+          bottom: max(10px, env(safe-area-inset-bottom));
+          left: max(10px, env(safe-area-inset-left));
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 48px 48px;
+          gap: 8px;
+          pointer-events: auto;
+        }
+
+        #mobile-article-controls button {
+          min-height: 44px;
+          border: 1px solid #526170;
+          border-radius: 14px;
+          color: #e6edf3;
+          background: rgb(17 25 35 / 94%);
+          font: 700 13px/1 "SFMono-Regular", Consolas, "Liberation Mono",
+            monospace;
+          box-shadow: 0 8px 26px rgb(0 0 0 / 35%);
+          touch-action: manipulation;
+        }
+
+        #mobile-article-controls button:active {
+          background: #315d82;
+          transform: translateY(1px);
         }
       }
 
@@ -195,6 +272,11 @@
   <body>
     <div id="terminal"></div>
     <div id="article-media-layer" aria-live="polite"></div>
+    <div id="mobile-article-controls" aria-label="Article navigation">
+      <button type="button" data-article-action="back">← Articles</button>
+      <button type="button" data-article-action="up" aria-label="Scroll article up">K ↑</button>
+      <button type="button" data-article-action="down" aria-label="Scroll article down">J ↓</button>
+    </div>
     <main class="semantic-fallback">
       <h1>svetsec.ru</h1>
       <nav aria-label="Primary">

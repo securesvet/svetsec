@@ -7,6 +7,3 @@ rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
-
-[dependencies]
-vim-line.workspace = true

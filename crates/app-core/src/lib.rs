@@ -1,5 +1,3 @@
-use vim_line::{Key as VimKey, KeyCode as VimKeyCode, LineEditor, VimLineEditor};
-
 pub const SITE_URL: &str = "https://svetsec.ru";
 pub const DOT_WELL_LANGUAGE: &str = "dot-well";
 pub const DOT_WELL_ROWS: u16 = 13;
@@ -134,6 +132,8 @@ pub enum HelpTarget {
     Status,
     Articles,
     Article(usize),
+    ArticleBack,
+    Resume,
     CodeRun(usize),
     CodeCopy(usize),
     PythonOutputClose,
@@ -161,6 +161,10 @@ impl HelpTarget {
             (Self::Articles, Language::Ru, _) => "Редактор статей, доступный только владельцу.",
             (Self::Article(_), Language::En, _) => "Open this article.",
             (Self::Article(_), Language::Ru, _) => "Открыть эту статью.",
+            (Self::ArticleBack, Language::En, _) => "Back to all articles.",
+            (Self::ArticleBack, Language::Ru, _) => "Вернуться к списку статей.",
+            (Self::Resume, Language::En, _) => "Open the PDF resume.",
+            (Self::Resume, Language::Ru, _) => "Открыть резюме в PDF.",
             (Self::CodeRun(_), Language::En, _) => "Run this Python block.",
             (Self::CodeRun(_), Language::Ru, _) => "Запустить этот Python-блок.",
             (Self::CodeCopy(_), Language::En, _) => "Copy this code block.",
@@ -195,9 +199,6 @@ pub enum Message {
     MoveArticleCursorToLineEnd,
     MoveArticleCursorToDocumentStart,
     MoveArticleCursorToDocumentEnd,
-    EnterArticleVim,
-    ExitArticleVim,
-    ArticleVimInput(ArticleVimKey),
     DismissPythonOutput,
     BeginArticleG,
     CompleteArticleG,
@@ -208,18 +209,6 @@ pub enum Message {
     CompleteSiteShortcut,
     CancelShortcut,
     Quit,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ArticleVimKey {
-    Char(char),
-    Up,
-    Down,
-    Left,
-    Right,
-    Home,
-    End,
-    Escape,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -279,13 +268,6 @@ pub struct ArticleCodeBlock {
     pub end_row: u16,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ArticleVimSelection {
-    pub row: u16,
-    pub start_column: u16,
-    pub end_column: u16,
-}
-
 impl ArticleCodeBlock {
     #[must_use]
     pub fn executable(&self) -> bool {
@@ -303,7 +285,6 @@ struct ArticleNavigation {
     cursor_start: u16,
     code_blocks: Vec<ArticleCodeBlock>,
     row_widths: Vec<u16>,
-    rows: Vec<String>,
 }
 
 impl ArticleSummary {
@@ -333,9 +314,6 @@ pub struct App {
     profile_image: Option<ArticleImage>,
     python_running: bool,
     python_output: Option<String>,
-    article_vim_mode: bool,
-    article_vim: VimLineEditor,
-    article_vim_count: u16,
     skeleton_phase: u8,
     article_animation_phase: u16,
     article_scroll: u16,
@@ -496,59 +474,6 @@ impl App {
     }
 
     #[must_use]
-    pub const fn article_vim_mode(&self) -> bool {
-        self.article_vim_mode
-    }
-
-    #[must_use]
-    pub fn article_vim_status(&self) -> &'static str {
-        match self.article_vim.status() {
-            "VISUAL" => "VISUAL RO",
-            _ => "NORMAL RO",
-        }
-    }
-
-    #[must_use]
-    pub const fn article_vim_count(&self) -> u16 {
-        self.article_vim_count
-    }
-
-    #[must_use]
-    pub fn article_vim_selection(&self) -> Vec<ArticleVimSelection> {
-        if !self.article_vim_mode {
-            return Vec::new();
-        }
-        let Some(selection) = self.article_vim.selection() else {
-            return Vec::new();
-        };
-        let Some(layout) = self.article_navigation() else {
-            return Vec::new();
-        };
-        let mut row_start = 0_usize;
-        let mut selections = Vec::new();
-        for (index, line) in layout.rows[usize::from(layout.cursor_start)..]
-            .iter()
-            .enumerate()
-        {
-            let row_end = row_start.saturating_add(line.len());
-            let start = selection.start.max(row_start).min(row_end);
-            let end = selection.end.max(row_start).min(row_end);
-            if start < end {
-                let start_column = line[..start - row_start].chars().count();
-                let end_column = line[..end - row_start].chars().count();
-                selections.push(ArticleVimSelection {
-                    row: (usize::from(layout.cursor_start) + index).min(usize::from(u16::MAX))
-                        as u16,
-                    start_column: start_column.min(usize::from(u16::MAX)) as u16,
-                    end_column: end_column.min(usize::from(u16::MAX)) as u16,
-                });
-            }
-            row_start = row_end.saturating_add(1);
-        }
-        selections
-    }
-
-    #[must_use]
     pub fn article_create_url(&self) -> Option<&str> {
         self.article_create_url.as_deref()
     }
@@ -649,9 +574,6 @@ impl App {
         self.article_scroll_limit = 0;
         self.python_running = false;
         self.python_output = None;
-        self.article_vim_mode = false;
-        self.article_vim.reset();
-        self.article_vim_count = 0;
         self.article_animation_phase = 0;
         self.article_cursor = self
             .article_navigation()
@@ -693,10 +615,7 @@ impl App {
         ) {
             self.awaiting_site_key = false;
         }
-        if !matches!(
-            message,
-            Message::BeginArticleG | Message::CompleteArticleG | Message::ArticleVimInput(_)
-        ) {
+        if !matches!(message, Message::BeginArticleG | Message::CompleteArticleG) {
             self.awaiting_article_g = false;
         }
 
@@ -756,16 +675,6 @@ impl App {
                 self.move_article_cursor_to_document(false)
             }
             Message::MoveArticleCursorToDocumentEnd => self.move_article_cursor_to_document(true),
-            Message::EnterArticleVim => {
-                if self.opened_article.is_some() {
-                    self.article_vim.reset();
-                    self.sync_article_vim_from_cursor();
-                    self.article_vim_count = 0;
-                    self.article_vim_mode = true;
-                }
-            }
-            Message::ExitArticleVim => self.exit_article_vim(),
-            Message::ArticleVimInput(key) => self.handle_article_vim_input(key),
             Message::DismissPythonOutput => {
                 self.python_running = false;
                 self.python_output = None;
@@ -787,9 +696,6 @@ impl App {
                 self.article_preferred_column = 0;
                 self.python_running = false;
                 self.python_output = None;
-                self.article_vim_mode = false;
-                self.article_vim.reset();
-                self.article_vim_count = 0;
                 self.awaiting_article_g = false;
                 self.article_animation_phase = 0;
             }
@@ -818,155 +724,6 @@ impl App {
     fn show_language_notice(&mut self) {
         self.language_notice = true;
         self.language_notice_generation = self.language_notice_generation.wrapping_add(1);
-    }
-
-    fn exit_article_vim(&mut self) {
-        self.article_vim_mode = false;
-        self.article_vim.reset();
-        self.article_vim_count = 0;
-        self.awaiting_article_g = false;
-    }
-
-    fn handle_article_vim_input(&mut self, key: ArticleVimKey) {
-        if !self.article_vim_mode {
-            return;
-        }
-
-        if key == ArticleVimKey::Escape {
-            if self.article_vim.status() == "NORMAL" {
-                self.exit_article_vim();
-            } else {
-                self.feed_article_vim_key(VimKey::code(VimKeyCode::Escape), 1);
-                self.article_vim_count = 0;
-                self.awaiting_article_g = false;
-            }
-            return;
-        }
-
-        let key = match key {
-            ArticleVimKey::Char(character) => {
-                ArticleVimKey::Char(normalize_article_vim_character(character))
-            }
-            other => other,
-        };
-
-        if let ArticleVimKey::Char(digit @ '0'..='9') = key
-            && (digit != '0' || self.article_vim_count > 0)
-        {
-            self.article_vim_count = self
-                .article_vim_count
-                .saturating_mul(10)
-                .saturating_add(digit.to_digit(10).unwrap_or_default() as u16)
-                .min(999);
-            self.awaiting_article_g = false;
-            return;
-        }
-
-        if key == ArticleVimKey::Char('g') {
-            if self.awaiting_article_g {
-                self.move_article_cursor_to_document(false);
-                self.sync_article_vim_from_cursor();
-                self.awaiting_article_g = false;
-                self.article_vim_count = 0;
-            } else {
-                self.awaiting_article_g = true;
-            }
-            return;
-        }
-
-        if key == ArticleVimKey::Char('G') {
-            self.move_article_cursor_to_document(true);
-            self.sync_article_vim_from_cursor();
-            self.awaiting_article_g = false;
-            self.article_vim_count = 0;
-            return;
-        }
-
-        if matches!(key, ArticleVimKey::Char('j') | ArticleVimKey::Down)
-            || matches!(key, ArticleVimKey::Char('k') | ArticleVimKey::Up)
-        {
-            let delta = if matches!(key, ArticleVimKey::Char('j') | ArticleVimKey::Down) {
-                1
-            } else {
-                -1
-            };
-            for _ in 0..self.article_vim_count.max(1) {
-                self.move_article_cursor(delta);
-            }
-            self.sync_article_vim_from_cursor();
-            self.article_vim_count = 0;
-            self.awaiting_article_g = false;
-            return;
-        }
-
-        let engine_key = match key {
-            ArticleVimKey::Char(character)
-                if matches!(
-                    character,
-                    'h' | 'j'
-                        | 'k'
-                        | 'l'
-                        | 'w'
-                        | 'b'
-                        | 'e'
-                        | 'W'
-                        | 'B'
-                        | 'E'
-                        | '0'
-                        | '^'
-                        | '$'
-                        | '%'
-                        | 'v'
-                ) =>
-            {
-                VimKey::char(character)
-            }
-            ArticleVimKey::Up => VimKey::char('k'),
-            ArticleVimKey::Down => VimKey::char('j'),
-            ArticleVimKey::Left => VimKey::code(VimKeyCode::Left),
-            ArticleVimKey::Right => VimKey::code(VimKeyCode::Right),
-            ArticleVimKey::Home => VimKey::code(VimKeyCode::Home),
-            ArticleVimKey::End => VimKey::code(VimKeyCode::End),
-            _ => {
-                self.article_vim_count = 0;
-                self.awaiting_article_g = false;
-                return;
-            }
-        };
-        let repetitions = if key == ArticleVimKey::Char('v') {
-            1
-        } else {
-            self.article_vim_count.max(1)
-        };
-        self.feed_article_vim_key(engine_key, repetitions);
-        self.article_vim_count = 0;
-        self.awaiting_article_g = false;
-    }
-
-    fn feed_article_vim_key(&mut self, key: VimKey, repetitions: u16) {
-        let Some(layout) = self.article_navigation() else {
-            return;
-        };
-        let document = article_vim_document(&layout);
-        let offset = article_vim_offset(&layout, self.article_cursor, self.article_cursor_column);
-        self.article_vim.set_cursor(offset, &document);
-        for _ in 0..repetitions {
-            let _ = self.article_vim.handle_key(key, &document);
-        }
-        let (row, column) = article_vim_position(&layout, self.article_vim.cursor());
-        self.article_cursor = row;
-        self.article_cursor_column = column;
-        self.article_preferred_column = column;
-        self.ensure_article_cursor_visible();
-    }
-
-    fn sync_article_vim_from_cursor(&mut self) {
-        let Some(layout) = self.article_navigation() else {
-            return;
-        };
-        let document = article_vim_document(&layout);
-        let offset = article_vim_offset(&layout, self.article_cursor, self.article_cursor_column);
-        self.article_vim.set_cursor(offset, &document);
     }
 
     fn select_article_cursor(&mut self, row: u16) {
@@ -1198,73 +955,8 @@ impl App {
             cursor_start,
             code_blocks,
             row_widths,
-            rows,
         })
     }
-}
-
-fn normalize_article_vim_character(character: char) -> char {
-    match character {
-        'р' => 'h',
-        'о' => 'j',
-        'л' => 'k',
-        'д' => 'l',
-        'ц' => 'w',
-        'и' => 'b',
-        'у' => 'e',
-        'Ц' => 'W',
-        'И' => 'B',
-        'У' => 'E',
-        'м' => 'v',
-        'п' => 'g',
-        'П' => 'G',
-        other => other,
-    }
-}
-
-fn article_vim_document(layout: &ArticleNavigation) -> String {
-    layout.rows[usize::from(layout.cursor_start)..].join("\n")
-}
-
-fn article_vim_offset(layout: &ArticleNavigation, row: u16, column: u16) -> usize {
-    let start = usize::from(layout.cursor_start);
-    let target = usize::from(row).clamp(start, layout.rows.len().saturating_sub(1));
-    let prefix = layout.rows[start..target]
-        .iter()
-        .map(|line| line.len().saturating_add(1))
-        .sum::<usize>();
-    let line = &layout.rows[target];
-    let column = usize::from(column).min(line.chars().count().saturating_sub(1));
-    let byte = line
-        .char_indices()
-        .nth(column)
-        .map_or(line.len(), |(byte, _)| byte);
-    prefix.saturating_add(byte)
-}
-
-fn article_vim_position(layout: &ArticleNavigation, offset: usize) -> (u16, u16) {
-    let start = usize::from(layout.cursor_start);
-    let mut remaining = offset;
-    for (index, line) in layout.rows[start..].iter().enumerate() {
-        if remaining <= line.len() {
-            let boundary = remaining.min(line.len());
-            let boundary = (0..=boundary)
-                .rev()
-                .find(|position| line.is_char_boundary(*position))
-                .unwrap_or_default();
-            let column = line[..boundary]
-                .chars()
-                .count()
-                .min(line.chars().count().saturating_sub(1));
-            return (
-                (start + index).min(usize::from(u16::MAX)) as u16,
-                column.min(usize::from(u16::MAX)) as u16,
-            );
-        }
-        remaining = remaining.saturating_sub(line.len().saturating_add(1));
-    }
-    let row = layout.total_rows.saturating_sub(1).max(layout.cursor_start);
-    (row, layout.row_widths[usize::from(row)].saturating_sub(1))
 }
 
 fn padded_article_row(mut row: String, width: usize) -> String {
@@ -1359,8 +1051,8 @@ fn markdown_display_text(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        App, ArticleContent, ArticleSummary, ArticleVimKey, DOT_WELL_ROWS, Effect, HelpTarget,
-        Language, Message, Tab, markdown_code_blocks, python_code_blocks,
+        App, ArticleContent, ArticleSummary, DOT_WELL_ROWS, Effect, HelpTarget, Language, Message,
+        Tab, markdown_code_blocks, python_code_blocks,
     };
 
     #[test]
@@ -1536,12 +1228,12 @@ mod tests {
     }
 
     #[test]
-    fn read_only_vim_cursor_moves_by_character_and_keeps_its_column() {
+    fn article_cursor_moves_by_line_and_keeps_its_column() {
         let mut app = App::default();
         let _ = app.update(Message::SelectTab(Tab::Articles));
         app.set_opened_article(ArticleContent {
-            slug: "vim".into(),
-            title: "Vim".into(),
+            slug: "reader".into(),
+            title: "Reader".into(),
             markdown: "abcdefgh\nx\nabcdefgh".into(),
             images: Vec::new(),
             labels: Vec::new(),
@@ -1563,75 +1255,6 @@ mod tests {
         assert_eq!(app.article_cursor_column(), 7);
         let _ = app.update(Message::MoveArticleCursorRight);
         assert_eq!(app.article_cursor_column(), 7);
-    }
-
-    #[test]
-    fn article_opens_in_view_and_i_enters_read_only_vim() {
-        let mut app = App::default();
-        let _ = app.update(Message::SelectTab(Tab::Articles));
-        app.set_opened_article(ArticleContent {
-            slug: "vim".into(),
-            title: "Vim".into(),
-            markdown: "first\nsecond\nthird".into(),
-            images: Vec::new(),
-            labels: Vec::new(),
-        });
-        app.set_article_viewport_rows(2);
-
-        assert!(!app.article_vim_mode());
-        let _ = app.update(Message::EnterArticleVim);
-        assert!(app.article_vim_mode());
-        let _ = app.update(Message::MoveArticleCursorToDocumentEnd);
-        assert_eq!(app.article_cursor(), app.article_total_rows() - 1);
-        let _ = app.update(Message::BeginArticleG);
-        assert!(app.awaiting_article_g());
-        let _ = app.update(Message::CompleteArticleG);
-        assert_eq!(app.article_cursor(), 2);
-        let _ = app.update(Message::ExitArticleVim);
-        assert!(!app.article_vim_mode());
-        assert!(app.opened_article().is_some());
-    }
-
-    #[test]
-    fn vim_engine_handles_words_counts_visual_mode_and_russian_layout() {
-        let mut app = App::default();
-        let _ = app.update(Message::SelectTab(Tab::Articles));
-        app.set_opened_article(ArticleContent {
-            slug: "vim-engine".into(),
-            title: "Vim engine".into(),
-            markdown: "alpha beta\nshort\nthird line\nfourth".into(),
-            images: Vec::new(),
-            labels: Vec::new(),
-        });
-        app.set_article_viewport_rows(3);
-        let _ = app.update(Message::SelectArticlePosition { row: 4, column: 0 });
-        let _ = app.update(Message::EnterArticleVim);
-
-        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('w')));
-        assert_eq!((app.article_cursor(), app.article_cursor_column()), (4, 6));
-        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('2')));
-        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('j')));
-        assert_eq!((app.article_cursor(), app.article_cursor_column()), (6, 6));
-        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('и')));
-        assert_eq!((app.article_cursor(), app.article_cursor_column()), (6, 0));
-
-        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('м')));
-        assert_eq!(app.article_vim_status(), "VISUAL RO");
-        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('w')));
-        assert_eq!(app.article_vim_selection().len(), 1);
-        assert_eq!(
-            (
-                app.article_vim_selection()[0].row,
-                app.article_vim_selection()[0].start_column,
-                app.article_vim_selection()[0].end_column,
-            ),
-            (6, 0, 7)
-        );
-        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Escape));
-        assert!(app.article_vim_mode());
-        assert_eq!(app.article_vim_status(), "NORMAL RO");
-        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Escape));
-        assert!(!app.article_vim_mode());
     }
 
     #[test]

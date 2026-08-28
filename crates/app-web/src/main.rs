@@ -7,8 +7,7 @@ use std::{
 use gloo_timers::future::TimeoutFuture;
 use ratzilla::{DomBackend, WebRenderer, event::KeyCode, ratatui::Terminal};
 use svetsec_core::{
-    App, ArticleContent, ArticleImage, ArticleSummary, ArticleVimKey, Effect, HelpTarget, Message,
-    SITE_URL, Tab,
+    App, ArticleContent, ArticleImage, ArticleSummary, Effect, HelpTarget, Message, SITE_URL, Tab,
 };
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
@@ -288,9 +287,11 @@ fn main() -> io::Result<()> {
                 let app = sync_app.borrow();
                 let _ = sync_browser_tabs(area, &app);
                 let _ = sync_browser_articles(area, &app);
+                let _ = sync_browser_navigation_links(area, &app);
                 let _ = sync_browser_code_actions(area, &app);
                 let _ = sync_browser_output_close(area, &app);
                 let _ = sync_browser_images(&app, area, &sync_image_count);
+                let _ = sync_mobile_article_controls(&app);
             });
         }
     });
@@ -396,6 +397,51 @@ fn sync_browser_articles(area: ratzilla::ratatui::layout::Rect, app: &App) -> Re
     Ok(())
 }
 
+fn sync_browser_navigation_links(
+    area: ratzilla::ratatui::layout::Rect,
+    app: &App,
+) -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+        return Ok(());
+    };
+    clear_cell_class(&grid, ".web-back-link")?;
+    clear_cell_class(&grid, ".web-resume-link")?;
+    if let Some(area) = svetsec_ui::article_back_area(area, app) {
+        set_area_class(&grid, area, "web-clickable web-back-link")?;
+    }
+    if let Some(area) = svetsec_ui::resume_link_area(area, app) {
+        set_area_class(&grid, area, "web-clickable web-resume-link")?;
+    }
+    Ok(())
+}
+
+fn sync_mobile_article_controls(app: &App) -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let Some(controls) = document.get_element_by_id("mobile-article-controls") else {
+        return Ok(());
+    };
+    controls.set_attribute(
+        "class",
+        if app.selected() == Tab::Articles && app.opened_article().is_some() {
+            "visible"
+        } else {
+            ""
+        },
+    )?;
+    if let Some(back) = controls.query_selector("[data-article-action=\"back\"]")? {
+        back.set_text_content(Some(match app.language() {
+            svetsec_core::Language::En => "← Articles",
+            svetsec_core::Language::Ru => "← Статьи",
+        }));
+    }
+    Ok(())
+}
+
 fn sync_browser_output_close(
     area: ratzilla::ratatui::layout::Rect,
     app: &App,
@@ -454,6 +500,27 @@ fn install_browser_events(
     let terminal = document
         .get_element_by_id("terminal")
         .ok_or_else(|| JsValue::from_str("terminal unavailable"))?;
+
+    if let Some(controls) = document.get_element_by_id("mobile-article-controls") {
+        for (action, message) in [
+            ("back", Message::CloseArticle),
+            ("up", Message::ScrollArticleUp),
+            ("down", Message::ScrollArticleDown),
+        ] {
+            let Some(button) =
+                controls.query_selector(&format!("[data-article-action=\"{action}\"]"))?
+            else {
+                continue;
+            };
+            let button_app = Rc::clone(&app);
+            let activate = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+                event.prevent_default();
+                let _ = button_app.borrow_mut().update(message);
+            });
+            button.add_event_listener_with_callback("click", activate.as_ref().unchecked_ref())?;
+            activate.forget();
+        }
+    }
 
     let key_app = Rc::clone(&app);
     let keydown = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
@@ -585,13 +652,8 @@ fn handle_key(app: Rc<RefCell<App>>, code: KeyCode) {
     let selected = app.borrow().selected();
     if selected == Tab::Articles {
         let article_open = app.borrow().opened_article().is_some();
-        let vim_mode = app.borrow().article_vim_mode();
         if article_open && char_is(&code, &['x', 'ч']) && app.borrow().python_output().is_some() {
             let _ = app.borrow_mut().update(Message::DismissPythonOutput);
-            return;
-        }
-        if article_open && !vim_mode && char_is(&code, &['i', 'ш']) {
-            let _ = app.borrow_mut().update(Message::EnterArticleVim);
             return;
         }
         if article_open && char_is(&code, &['p', 'з']) {
@@ -600,13 +662,6 @@ fn handle_key(app: Rc<RefCell<App>>, code: KeyCode) {
         }
         if article_open && char_is(&code, &['c', 'с']) {
             copy_article_code(app, None);
-            return;
-        }
-        if article_open
-            && vim_mode
-            && let Some(key) = article_vim_key(&code)
-        {
-            let _ = app.borrow_mut().update(Message::ArticleVimInput(key));
             return;
         }
         if matches!(&code, KeyCode::Up) || char_is(&code, &['k', 'л']) {
@@ -773,6 +828,18 @@ fn activate_at(
         svetsec_ui::help_target_at(area, column, row, &app)
     };
     let _ = app.borrow_mut().update(Message::Hover(target));
+    if svetsec_ui::article_back_area(area, &app.borrow())
+        .is_some_and(|area| area.contains((column, row).into()))
+    {
+        let _ = app.borrow_mut().update(Message::CloseArticle);
+        return;
+    }
+    if svetsec_ui::resume_link_area(area, &app.borrow())
+        .is_some_and(|area| area.contains((column, row).into()))
+    {
+        let _ = ratzilla::utils::open_url("/assets/resume.pdf", true);
+        return;
+    }
     if svetsec_ui::python_output_close_area(area, &app.borrow())
         .is_some_and(|area| area.contains((column, row).into()))
     {
@@ -1248,20 +1315,6 @@ fn string_array(value: &JsValue, field: &str) -> Vec<String> {
 
 fn char_is(code: &KeyCode, characters: &[char]) -> bool {
     matches!(code, KeyCode::Char(character) if characters.contains(character))
-}
-
-fn article_vim_key(code: &KeyCode) -> Option<ArticleVimKey> {
-    match code {
-        KeyCode::Char(character) => Some(ArticleVimKey::Char(*character)),
-        KeyCode::Up => Some(ArticleVimKey::Up),
-        KeyCode::Down => Some(ArticleVimKey::Down),
-        KeyCode::Left => Some(ArticleVimKey::Left),
-        KeyCode::Right => Some(ArticleVimKey::Right),
-        KeyCode::Home => Some(ArticleVimKey::Home),
-        KeyCode::End => Some(ArticleVimKey::End),
-        KeyCode::Esc => Some(ArticleVimKey::Escape),
-        _ => None,
-    }
 }
 
 async fn request_json(method: &str, url: &str, body: Option<String>) -> Result<JsValue, JsValue> {
