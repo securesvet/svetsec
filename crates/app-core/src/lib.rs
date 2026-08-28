@@ -3,6 +3,45 @@ pub const DOT_WELL_LANGUAGE: &str = "dot-well";
 pub const DOT_WELL_ROWS: u16 = 13;
 pub const DOT_WELL_FRAMES: u16 = 120;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Project {
+    pub name: &'static str,
+    pub url: &'static str,
+    pub display_url: &'static str,
+    pub description_en: &'static str,
+    pub description_ru: &'static str,
+    pub tags: &'static [&'static str],
+}
+
+impl Project {
+    #[must_use]
+    pub const fn description(self, language: Language) -> &'static str {
+        match language {
+            Language::En => self.description_en,
+            Language::Ru => self.description_ru,
+        }
+    }
+}
+
+pub const PROJECTS: [Project; 2] = [
+    Project {
+        name: "T-Bank brand portal",
+        url: "https://brand.tbank.ru/",
+        display_url: "brand.tbank.ru",
+        description_en: "Guidelines for T-Bank brand, graphics, interfaces, and content.",
+        description_ru: "Гайдлайны Т-Банка по бренду, графике, интерфейсам и контенту.",
+        tags: &["Docusaurus", "Design system"],
+    },
+    Project {
+        name: "svetsec",
+        url: "https://github.com/securesvet/svetsec",
+        display_url: "github.com/securesvet/svetsec",
+        description_en: "This site's Rust TUI, shared by the browser and SSH.",
+        description_ru: "Rust TUI этого сайта, общий для браузера и SSH.",
+        tags: &["Rust", "WASM", "SSH"],
+    },
+];
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Language {
     #[default]
@@ -60,18 +99,20 @@ pub enum Tab {
     #[default]
     Main,
     Articles,
+    Projects,
     Info,
 }
 
 impl Tab {
-    pub const ALL: [Self; 3] = [Self::Main, Self::Articles, Self::Info];
+    pub const ALL: [Self; 4] = [Self::Main, Self::Articles, Self::Projects, Self::Info];
 
     #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::Main => 0,
             Self::Articles => 1,
-            Self::Info => 2,
+            Self::Projects => 2,
+            Self::Info => 3,
         }
     }
 
@@ -80,9 +121,11 @@ impl Tab {
         match (self, language) {
             (Self::Main, Language::En) => "Main",
             (Self::Articles, Language::En) => "Articles",
+            (Self::Projects, Language::En) => "Projects",
             (Self::Info, Language::En) => "Info",
             (Self::Main, Language::Ru) => "Главная",
             (Self::Articles, Language::Ru) => "Статьи",
+            (Self::Projects, Language::Ru) => "Проекты",
             (Self::Info, Language::Ru) => "О сайте",
         }
     }
@@ -92,9 +135,11 @@ impl Tab {
         match (self, language) {
             (Self::Main, Language::En) => "Hello, internet.",
             (Self::Articles, Language::En) => "Articles",
+            (Self::Projects, Language::En) => "Selected projects",
             (Self::Info, Language::En) => "About svetsec.ru",
             (Self::Main, Language::Ru) => "Привет, интернет.",
             (Self::Articles, Language::Ru) => "Статьи",
+            (Self::Projects, Language::Ru) => "Избранные проекты",
             (Self::Info, Language::Ru) => "О svetsec.ru",
         }
     }
@@ -108,6 +153,9 @@ impl Tab {
             (Self::Articles, Language::En) => {
                 "Notes about security, Rust, and systems. The owner can press e to write."
             }
+            (Self::Projects, Language::En) => {
+                "Things I have built and the source code behind this site."
+            }
             (Self::Info, Language::En) => {
                 "svetsec.ru is a personal site built as a cross-platform TUI experiment."
             }
@@ -117,6 +165,7 @@ impl Tab {
             (Self::Articles, Language::Ru) => {
                 "Заметки о безопасности, Rust и системах. Владелец может нажать e для записи."
             }
+            (Self::Projects, Language::Ru) => "Мои проекты и исходный код этого сайта.",
             (Self::Info, Language::Ru) => {
                 "svetsec.ru — персональный сайт и эксперимент с кроссплатформенным TUI."
             }
@@ -133,6 +182,7 @@ pub enum HelpTarget {
     Articles,
     Article(usize),
     ArticleBack,
+    Project(usize),
     Resume,
     CodeRun(usize),
     CodeCopy(usize),
@@ -163,6 +213,8 @@ impl HelpTarget {
             (Self::Article(_), Language::Ru, _) => "Открыть эту статью.",
             (Self::ArticleBack, Language::En, _) => "Back to all articles.",
             (Self::ArticleBack, Language::Ru, _) => "Вернуться к списку статей.",
+            (Self::Project(_), Language::En, _) => "Open this project.",
+            (Self::Project(_), Language::Ru, _) => "Открыть этот проект.",
             (Self::Resume, Language::En, _) => "Open the PDF resume.",
             (Self::Resume, Language::Ru, _) => "Открыть резюме в PDF.",
             (Self::CodeRun(_), Language::En, _) => "Run this Python block.",
@@ -189,6 +241,10 @@ pub enum Message {
     NextArticle,
     PreviousArticle,
     SelectArticle(usize),
+    NextProject,
+    PreviousProject,
+    SelectProject(usize),
+    OpenSelectedProject,
     SelectArticleCursor(u16),
     SelectArticlePosition { row: u16, column: u16 },
     ScrollArticleDown,
@@ -213,7 +269,7 @@ pub enum Message {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Effect {
-    OpenSite,
+    OpenUrl(&'static str),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -308,6 +364,7 @@ pub struct App {
     articles_loading: bool,
     article_loading: bool,
     selected_article: usize,
+    selected_project: usize,
     opened_article: Option<ArticleContent>,
     articles_error: Option<String>,
     article_create_url: Option<String>,
@@ -511,6 +568,16 @@ impl App {
     }
 
     #[must_use]
+    pub const fn selected_project_index(&self) -> usize {
+        self.selected_project
+    }
+
+    #[must_use]
+    pub fn selected_project(&self) -> Project {
+        PROJECTS[self.selected_project.min(PROJECTS.len().saturating_sub(1))]
+    }
+
+    #[must_use]
     pub const fn opened_article(&self) -> Option<&ArticleContent> {
         self.opened_article.as_ref()
     }
@@ -661,6 +728,21 @@ impl App {
                     self.selected_article = index;
                 }
             }
+            Message::NextProject => {
+                self.selected_project = (self.selected_project + 1) % PROJECTS.len();
+            }
+            Message::PreviousProject => {
+                self.selected_project =
+                    (self.selected_project + PROJECTS.len() - 1) % PROJECTS.len();
+            }
+            Message::SelectProject(index) => {
+                if index < PROJECTS.len() {
+                    self.selected_project = index;
+                }
+            }
+            Message::OpenSelectedProject => {
+                return Some(Effect::OpenUrl(self.selected_project().url));
+            }
             Message::SelectArticleCursor(row) => self.select_article_cursor(row),
             Message::SelectArticlePosition { row, column } => {
                 self.select_article_position(row, column);
@@ -710,7 +792,7 @@ impl App {
             }
             Message::BeginSiteShortcut => self.awaiting_site_key = true,
             Message::CompleteSiteShortcut => {
-                let effect = self.awaiting_site_key.then_some(Effect::OpenSite);
+                let effect = self.awaiting_site_key.then_some(Effect::OpenUrl(SITE_URL));
                 self.awaiting_site_key = false;
                 return effect;
             }
@@ -1052,7 +1134,7 @@ fn markdown_display_text(raw: &str) -> String {
 mod tests {
     use super::{
         App, ArticleContent, ArticleSummary, DOT_WELL_ROWS, Effect, HelpTarget, Language, Message,
-        Tab, markdown_code_blocks, python_code_blocks,
+        PROJECTS, SITE_URL, Tab, markdown_code_blocks, python_code_blocks,
     };
 
     #[test]
@@ -1087,8 +1169,23 @@ mod tests {
         assert_eq!(app.update(Message::BeginSiteShortcut), None);
         assert_eq!(
             app.update(Message::CompleteSiteShortcut),
-            Some(Effect::OpenSite)
+            Some(Effect::OpenUrl(SITE_URL))
         );
+    }
+
+    #[test]
+    fn projects_have_wrapping_selection_and_open_effects() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Projects));
+        assert_eq!(app.selected_project_index(), 0);
+        let _ = app.update(Message::PreviousProject);
+        assert_eq!(app.selected_project_index(), PROJECTS.len() - 1);
+        assert_eq!(
+            app.update(Message::OpenSelectedProject),
+            Some(Effect::OpenUrl(PROJECTS[1].url))
+        );
+        let _ = app.update(Message::NextProject);
+        assert_eq!(app.selected_project_index(), 0);
     }
 
     #[test]

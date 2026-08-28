@@ -372,6 +372,25 @@ impl Handler for SshServer {
             }
         }
 
+        if client.app.selected() == Tab::Projects {
+            if data == b"\x1b[A" || data == b"k" || data == "л".as_bytes() {
+                let _ = client.app.update(Message::PreviousProject);
+                return Ok(());
+            }
+            if data == b"\x1b[B" || data == b"j" || data == "о".as_bytes() {
+                let _ = client.app.update(Message::NextProject);
+                return Ok(());
+            }
+            if data == b"\r" || data == b"o" || data == "щ".as_bytes() {
+                let clipboard = format!(
+                    "\x1b]52;c;{}\x07",
+                    STANDARD.encode(client.app.selected_project().url)
+                );
+                session.data(channel, clipboard.into_bytes())?;
+                return Ok(());
+            }
+        }
+
         let message = if data == b"\x1b[C" || data == b"l" || data == "д".as_bytes() {
             Some(Message::NextTab)
         } else if data == b"\x1b[D" || data == b"h" || data == "р".as_bytes() {
@@ -381,6 +400,8 @@ impl Handler for SshServer {
         } else if data == b"2" {
             Some(Message::SelectTab(Tab::Articles))
         } else if data == b"3" {
+            Some(Message::SelectTab(Tab::Projects))
+        } else if data == b"4" {
             Some(Message::SelectTab(Tab::Info))
         } else if data == b"r" || data == "к".as_bytes() {
             Some(Message::ToggleLanguage)

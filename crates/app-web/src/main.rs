@@ -7,7 +7,7 @@ use std::{
 use gloo_timers::future::TimeoutFuture;
 use ratzilla::{DomBackend, WebRenderer, event::KeyCode, ratatui::Terminal};
 use svetsec_core::{
-    App, ArticleContent, ArticleImage, ArticleSummary, Effect, HelpTarget, Message, SITE_URL, Tab,
+    App, ArticleContent, ArticleImage, ArticleSummary, Effect, HelpTarget, Message, Tab,
 };
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
@@ -20,7 +20,12 @@ use web_sys::{
 struct DomSignature {
     area: ratzilla::ratatui::layout::Rect,
     selected: Tab,
+    language: svetsec_core::Language,
     hovered: Option<HelpTarget>,
+    articles_len: usize,
+    articles_loading: bool,
+    article_loading: bool,
+    selected_project: usize,
     opened_slug: Option<String>,
     article_scroll: u16,
     article_cursor: u16,
@@ -36,6 +41,7 @@ enum WebRoute {
     Main,
     Articles,
     Article(String),
+    Projects,
     Info,
 }
 
@@ -58,6 +64,7 @@ impl WebRoute {
                 Self::Article((*slug).to_owned())
             }
             ["info"] => Self::Info,
+            ["projects"] => Self::Projects,
             _ => Self::Main,
         }
     }
@@ -66,6 +73,7 @@ impl WebRoute {
         match app.selected() {
             Tab::Main => Self::Main,
             Tab::Info => Self::Info,
+            Tab::Projects => Self::Projects,
             Tab::Articles => app.opened_article().map_or(Self::Articles, |article| {
                 Self::Article(article.slug.clone())
             }),
@@ -77,6 +85,7 @@ impl WebRoute {
             Self::Main => "/".into(),
             Self::Articles => "/articles".into(),
             Self::Article(slug) => format!("/articles/{slug}"),
+            Self::Projects => "/projects".into(),
             Self::Info => "/info".into(),
         }
     }
@@ -85,6 +94,7 @@ impl WebRoute {
         match self {
             Self::Main => Tab::Main,
             Self::Articles | Self::Article(_) => Tab::Articles,
+            Self::Projects => Tab::Projects,
             Self::Info => Tab::Info,
         }
     }
@@ -101,7 +111,12 @@ impl DomSignature {
         Self {
             area,
             selected: app.selected(),
+            language: app.language(),
             hovered: app.hovered(),
+            articles_len: app.articles().len(),
+            articles_loading: app.articles_loading(),
+            article_loading: app.article_loading(),
+            selected_project: app.selected_project_index(),
             opened_slug: app.opened_article().map(|article| article.slug.clone()),
             article_scroll: app.article_scroll(),
             article_cursor: app.article_cursor(),
@@ -133,6 +148,7 @@ fn sync_browser_route(app: &App, route_state: &Rc<RefCell<RouteState>>) {
                 WebRoute::Main => "svetsec.ru".into(),
                 WebRoute::Articles => "Articles — svetsec.ru".into(),
                 WebRoute::Article(slug) => format!("{slug} — svetsec.ru"),
+                WebRoute::Projects => "Projects — svetsec.ru".into(),
                 WebRoute::Info => "Info — svetsec.ru".into(),
             };
             document.set_title(&title);
@@ -168,7 +184,7 @@ fn apply_web_route(app: Rc<RefCell<App>>, route: WebRoute, route_state: Rc<RefCe
     }
     let _ = app.borrow_mut().update(Message::SelectTab(route.tab()));
     match route {
-        WebRoute::Main | WebRoute::Info => {
+        WebRoute::Main | WebRoute::Projects | WebRoute::Info => {
             if app.borrow().opened_article().is_some() {
                 let _ = app.borrow_mut().update(Message::CloseArticle);
             }
@@ -288,11 +304,13 @@ fn main() -> io::Result<()> {
                 let app = sync_app.borrow();
                 let _ = sync_browser_tabs(area, &app);
                 let _ = sync_browser_articles(area, &app);
+                let _ = sync_browser_projects(area, &app);
                 let _ = sync_browser_navigation_links(area, &app);
                 let _ = sync_browser_code_actions(area, &app);
                 let _ = sync_browser_output_close(area, &app);
                 let _ = sync_browser_images(&app, area, &sync_image_count);
                 let _ = sync_mobile_controls(&app);
+                let _ = sync_browser_text_selection();
             });
         }
     });
@@ -398,6 +416,20 @@ fn sync_browser_articles(area: ratzilla::ratatui::layout::Rect, app: &App) -> Re
     Ok(())
 }
 
+fn sync_browser_projects(area: ratzilla::ratatui::layout::Rect, app: &App) -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+        return Ok(());
+    };
+    clear_cell_class(&grid, ".web-project-card")?;
+    for (_, area) in svetsec_ui::project_areas(area, app) {
+        set_area_class(&grid, area, "web-clickable web-project-card")?;
+    }
+    Ok(())
+}
+
 fn sync_browser_navigation_links(
     area: ratzilla::ratatui::layout::Rect,
     app: &App,
@@ -446,6 +478,7 @@ fn sync_mobile_controls(app: &App) -> Result<(), JsValue> {
     for (tab, selector) in [
         (Tab::Main, "main"),
         (Tab::Articles, "articles"),
+        (Tab::Projects, "projects"),
         (Tab::Info, "info"),
     ] {
         let Some(link) = controls.query_selector(&format!("[data-mobile-tab=\"{selector}\"]"))?
@@ -507,6 +540,68 @@ fn set_area_class(
     Ok(())
 }
 
+fn sync_browser_text_selection() -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+        return Ok(());
+    };
+    clear_cell_class(&grid, ".web-selectable-text")?;
+    let rows = grid.query_selector_all("pre")?;
+    for row_index in 0..rows.length() {
+        let Some(row) = rows.item(row_index) else {
+            continue;
+        };
+        let Some(row) = row.dyn_ref::<web_sys::Element>() else {
+            continue;
+        };
+        let cells = row.query_selector_all("span")?;
+        let mut first = None;
+        let mut last = None;
+        for index in 0..cells.length() {
+            let Some(cell) = cells.item(index) else {
+                continue;
+            };
+            if cell
+                .text_content()
+                .as_deref()
+                .is_some_and(cell_contains_selectable_text)
+            {
+                first.get_or_insert(index);
+                last = Some(index);
+            }
+        }
+        let (Some(first), Some(last)) = (first, last) else {
+            continue;
+        };
+        for index in first..=last {
+            let Some(cell) = cells.item(index) else {
+                continue;
+            };
+            let Some(cell) = cell.dyn_ref::<web_sys::Element>() else {
+                continue;
+            };
+            if cell
+                .get_attribute("class")
+                .is_some_and(|class| class.contains("web-"))
+            {
+                continue;
+            }
+            cell.set_attribute("class", "web-selectable-text")?;
+        }
+    }
+    Ok(())
+}
+
+fn cell_contains_selectable_text(text: &str) -> bool {
+    text.chars().any(|character| {
+        !character.is_whitespace()
+            && !(('\u{2500}'..='\u{257f}').contains(&character))
+            && !(('\u{2800}'..='\u{28ff}').contains(&character))
+    })
+}
+
 fn install_browser_events(
     app: Rc<RefCell<App>>,
     viewport: Rc<Cell<ratzilla::ratatui::layout::Rect>>,
@@ -544,6 +639,7 @@ fn install_browser_events(
         for (selector, tab) in [
             ("main", Tab::Main),
             ("articles", Tab::Articles),
+            ("projects", Tab::Projects),
             ("info", Tab::Info),
         ] {
             let Some(link) =
@@ -777,6 +873,23 @@ fn handle_key(app: Rc<RefCell<App>>, code: KeyCode) {
         return;
     }
     let selected = app.borrow().selected();
+    if selected == Tab::Projects {
+        let message = if matches!(&code, KeyCode::Up) || char_is(&code, &['k', 'л']) {
+            Some(Message::PreviousProject)
+        } else if matches!(&code, KeyCode::Down) || char_is(&code, &['j', 'о']) {
+            Some(Message::NextProject)
+        } else if matches!(&code, KeyCode::Enter) || char_is(&code, &['o', 'щ']) {
+            Some(Message::OpenSelectedProject)
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            if let Some(effect) = app.borrow_mut().update(message) {
+                apply_effect(effect);
+            }
+            return;
+        }
+    }
     if selected == Tab::Articles {
         let article_open = app.borrow().opened_article().is_some();
         if article_open && char_is(&code, &['x', 'ч']) && app.borrow().python_output().is_some() {
@@ -964,7 +1077,18 @@ fn activate_at(
     if svetsec_ui::resume_link_area(area, &app.borrow())
         .is_some_and(|area| area.contains((column, row).into()))
     {
-        let _ = ratzilla::utils::open_url("/assets/resume.pdf", true);
+        let _ = ratzilla::utils::open_url("/resume", true);
+        return;
+    }
+    let project = {
+        let app = app.borrow();
+        svetsec_ui::project_at(area, column, row, &app)
+    };
+    if let Some(index) = project {
+        let _ = app.borrow_mut().update(Message::SelectProject(index));
+        if let Some(effect) = app.borrow_mut().update(Message::OpenSelectedProject) {
+            apply_effect(effect);
+        }
         return;
     }
     if svetsec_ui::python_output_close_area(area, &app.borrow())
@@ -1102,7 +1226,8 @@ fn message_for_key(code: KeyCode) -> Message {
         KeyCode::Left | KeyCode::Char('h' | 'р') => Message::PreviousTab,
         KeyCode::Char('1') => Message::SelectTab(Tab::Main),
         KeyCode::Char('2') => Message::SelectTab(Tab::Articles),
-        KeyCode::Char('3') => Message::SelectTab(Tab::Info),
+        KeyCode::Char('3') => Message::SelectTab(Tab::Projects),
+        KeyCode::Char('4') => Message::SelectTab(Tab::Info),
         KeyCode::Char('r' | 'к') => Message::ToggleLanguage,
         KeyCode::Char('g' | 'п') => Message::BeginSiteShortcut,
         KeyCode::Char('x' | 'ч') => Message::CompleteSiteShortcut,
@@ -1112,8 +1237,8 @@ fn message_for_key(code: KeyCode) -> Message {
 
 fn apply_effect(effect: Effect) {
     match effect {
-        Effect::OpenSite => {
-            let _ = ratzilla::utils::open_url(SITE_URL, true);
+        Effect::OpenUrl(url) => {
+            let _ = ratzilla::utils::open_url(url, true);
         }
     }
 }
@@ -1470,7 +1595,10 @@ mod tests {
     use ratzilla::event::KeyCode;
     use svetsec_core::{App, ArticleContent, Message, Tab};
 
-    use super::{WebRoute, browser_key_code, grid_axis, grid_cell_axis, wheel_delta_rows};
+    use super::{
+        WebRoute, browser_key_code, cell_contains_selectable_text, grid_axis, grid_cell_axis,
+        wheel_delta_rows,
+    };
 
     #[test]
     fn browser_keys_support_both_layouts() {
@@ -1498,9 +1626,19 @@ mod tests {
     }
 
     #[test]
+    fn selection_ignores_terminal_chrome_and_animation_cells() {
+        assert!(cell_contains_selectable_text("Article text"));
+        assert!(cell_contains_selectable_text("print(42)"));
+        assert!(!cell_contains_selectable_text("   "));
+        assert!(!cell_contains_selectable_text("╭────╮"));
+        assert!(!cell_contains_selectable_text("⠋⠙⠹"));
+    }
+
+    #[test]
     fn web_routes_round_trip_and_reject_unsafe_slugs() {
         assert_eq!(WebRoute::from_path("/"), WebRoute::Main);
         assert_eq!(WebRoute::from_path("/articles"), WebRoute::Articles);
+        assert_eq!(WebRoute::from_path("/projects"), WebRoute::Projects);
         assert_eq!(
             WebRoute::from_path("/articles/hello-world"),
             WebRoute::Article("hello-world".into())
@@ -1510,6 +1648,7 @@ mod tests {
             WebRoute::Article("hello-world".into()).path(),
             "/articles/hello-world"
         );
+        assert_eq!(WebRoute::Projects.path(), "/projects");
 
         let mut app = App::default();
         let _ = app.update(Message::SelectTab(Tab::Articles));

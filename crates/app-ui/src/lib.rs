@@ -7,7 +7,8 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
 };
 use svetsec_core::{
-    App, ArticleImage, DOT_WELL_FRAMES, DOT_WELL_LANGUAGE, DOT_WELL_ROWS, HelpTarget, Language, Tab,
+    App, ArticleImage, DOT_WELL_FRAMES, DOT_WELL_LANGUAGE, DOT_WELL_ROWS, HelpTarget, Language,
+    PROJECTS, Tab,
 };
 
 const WHITE: Color = Color::Rgb(247, 251, 255);
@@ -30,6 +31,16 @@ const CODE_NUMBER: Color = Color::Rgb(244, 162, 97);
 const CODE_COMMENT: Color = Color::Rgb(126, 142, 156);
 const CODE_FOCUS: Color = Color::Rgb(24, 36, 51);
 const MOBILE_BREAKPOINT: u16 = 56;
+const RESUME_LINK_LABEL: &str = "svetsec.ru/resume";
+
+const fn resume_prefix(language: Language, compact: bool) -> &'static str {
+    match (language, compact) {
+        (Language::En, false) => "Resume PDF  ",
+        (Language::Ru, false) => "Резюме PDF  ",
+        (Language::En, true) => "Resume  ",
+        (Language::Ru, true) => "Резюме  ",
+    }
+}
 
 #[must_use]
 pub fn label_color(label: &str) -> Color {
@@ -67,7 +78,7 @@ struct UiLayout {
     content: Rect,
     footer: Rect,
     logo: Rect,
-    tabs: [Rect; 3],
+    tabs: [Rect; 4],
     status: Option<Rect>,
     compact: bool,
 }
@@ -116,13 +127,61 @@ pub fn tab_at(area: Rect, column: u16, row: u16) -> Option<Tab> {
 }
 
 #[must_use]
-pub fn tab_areas(area: Rect) -> [(Tab, Rect); 3] {
+pub fn tab_areas(area: Rect) -> [(Tab, Rect); 4] {
     let tabs = layout(area).tabs;
     [
         (Tab::Main, tabs[0]),
         (Tab::Articles, tabs[1]),
-        (Tab::Info, tabs[2]),
+        (Tab::Projects, tabs[2]),
+        (Tab::Info, tabs[3]),
     ]
+}
+
+#[must_use]
+pub fn project_at(area: Rect, column: u16, row: u16, app: &App) -> Option<usize> {
+    project_areas(area, app)
+        .into_iter()
+        .find_map(|(index, area)| area.contains((column, row).into()).then_some(index))
+}
+
+#[must_use]
+pub fn project_areas(area: Rect, app: &App) -> Vec<(usize, Rect)> {
+    if app.selected() != Tab::Projects {
+        return Vec::new();
+    }
+    let (panel, compact) = primary_panel_area(area);
+    project_card_areas(panel, compact)
+        .into_iter()
+        .enumerate()
+        .collect()
+}
+
+fn project_card_areas(panel: Rect, compact: bool) -> Vec<Rect> {
+    let horizontal_padding = if compact { 1 } else { 2 };
+    let left = panel.left().saturating_add(1 + horizontal_padding);
+    let width = panel.width.saturating_sub(2 + horizontal_padding * 2);
+    let top = panel.top().saturating_add(4);
+    let available_height = panel.bottom().saturating_sub(1 + top);
+    if width >= 58 {
+        let columns = Layout::horizontal([
+            Constraint::Percentage(50),
+            Constraint::Length(1),
+            Constraint::Percentage(50),
+        ])
+        .split(Rect::new(left, top, width, available_height.min(10)));
+        vec![columns[0], columns[2]]
+    } else {
+        let card_height = available_height.saturating_sub(1) / 2;
+        vec![
+            Rect::new(left, top, width, card_height),
+            Rect::new(
+                left,
+                top.saturating_add(card_height + 1),
+                width,
+                card_height,
+            ),
+        ]
+    }
 }
 
 #[must_use]
@@ -194,10 +253,15 @@ pub fn article_back_area(area: Rect, app: &App) -> Option<Rect> {
     (app.selected() == Tab::Articles && app.opened_article().is_some()).then(|| {
         let (panel, compact) = primary_panel_area(area);
         let horizontal_padding = if compact { 1 } else { 2 };
+        let label_width = match app.language() {
+            Language::En => "← Back".chars().count(),
+            Language::Ru => "← Назад".chars().count(),
+        }
+        .min(usize::from(u16::MAX)) as u16;
         Rect::new(
             panel.left().saturating_add(1 + horizontal_padding),
             panel.top().saturating_add(2),
-            10.min(panel.width.saturating_sub(2 + horizontal_padding * 2)),
+            label_width.min(panel.width.saturating_sub(2 + horizontal_padding * 2)),
             1,
         )
     })
@@ -208,10 +272,19 @@ pub fn resume_link_area(area: Rect, app: &App) -> Option<Rect> {
     (app.selected() == Tab::Info).then(|| {
         let (panel, compact) = primary_panel_area(area);
         let horizontal_padding = if compact { 1 } else { 2 };
+        let label_width = resume_prefix(app.language(), compact)
+            .chars()
+            .count()
+            .min(usize::from(u16::MAX)) as u16;
+        let link_width = RESUME_LINK_LABEL.chars().count().min(usize::from(u16::MAX)) as u16;
+        let left = panel
+            .left()
+            .saturating_add(1 + horizontal_padding)
+            .saturating_add(label_width);
         Rect::new(
-            panel.left().saturating_add(1 + horizontal_padding),
+            left,
             panel.top().saturating_add(6),
-            panel.width.saturating_sub(2 + horizontal_padding * 2),
+            link_width.min(panel.right().saturating_sub(1 + horizontal_padding + left)),
             1,
         )
     })
@@ -367,6 +440,9 @@ pub fn help_target_at(area: Rect, column: u16, row: u16, app: &App) -> Option<He
     if resume_link_area(area, app).is_some_and(|area| area.contains(position)) {
         return Some(HelpTarget::Resume);
     }
+    if let Some(index) = project_at(area, column, row, app) {
+        return Some(HelpTarget::Project(index));
+    }
     if layout.logo.contains(position) {
         return Some(HelpTarget::Logo);
     }
@@ -379,7 +455,8 @@ pub fn help_target_at(area: Rect, column: u16, row: u16, app: &App) -> Option<He
     if layout.status.is_some_and(|area| area.contains(position)) {
         return Some(HelpTarget::Status);
     }
-    (layout.content.contains(position)).then_some(HelpTarget::Articles)
+    (layout.content.contains(position) && app.selected() == Tab::Articles)
+        .then_some(HelpTarget::Articles)
 }
 
 #[must_use]
@@ -463,7 +540,7 @@ pub fn native_image_placements<'a>(area: Rect, app: &'a App) -> Vec<ArticleImage
                 })
                 .collect()
         }
-        Tab::Main => Vec::new(),
+        Tab::Main | Tab::Projects => Vec::new(),
     }
 }
 
@@ -607,6 +684,10 @@ fn render_language_notice(frame: &mut Frame<'_>, area: Rect, language: Language)
 }
 
 fn render_content(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    if app.selected() == Tab::Articles && app.article_loading() {
+        render_primary_panel(frame, area, app, area.width < 76);
+        return;
+    }
     let show_python_output = app.selected() == Tab::Articles
         && app.opened_article().is_some()
         && (app.python_running() || app.python_output().is_some());
@@ -643,6 +724,10 @@ fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: b
         render_articles_panel(frame, area, app, compact);
         return;
     }
+    if app.selected() == Tab::Projects {
+        render_projects_panel(frame, area, app, compact);
+        return;
+    }
     frame.render_widget(Block::new().style(Style::new().bg(PANEL)), area);
 
     let mut content = vec![
@@ -660,14 +745,11 @@ fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: b
     if app.selected() == Tab::Info {
         content.push(Line::from(vec![
             Span::styled(
-                match app.language() {
-                    Language::En => "Resume PDF  ",
-                    Language::Ru => "Резюме PDF  ",
-                },
+                resume_prefix(app.language(), compact),
                 Style::new().fg(INK).bold(),
             ),
             Span::styled(
-                "https://svetsec.ru/assets/resume.pdf",
+                RESUME_LINK_LABEL,
                 Style::new().fg(Color::Rgb(143, 199, 242)).underlined(),
             ),
         ]));
@@ -711,6 +793,87 @@ fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: b
     paint_gradient_border(frame.buffer_mut(), area, INK, MID_GRAY);
 }
 
+fn render_projects_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
+    frame.render_widget(Block::new().style(Style::new().bg(PANEL)), area);
+    let horizontal_padding = if compact { 1 } else { 2 };
+    let intro = Rect::new(
+        area.left().saturating_add(1 + horizontal_padding),
+        area.top().saturating_add(2),
+        area.width.saturating_sub(2 + horizontal_padding * 2),
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(app.selected().description(app.language())).style(Style::new().fg(MUTED)),
+        intro,
+    );
+
+    for (index, (project, card)) in PROJECTS
+        .into_iter()
+        .zip(project_card_areas(area, compact))
+        .enumerate()
+    {
+        if card.width < 4 || card.height < 3 {
+            continue;
+        }
+        let selected = index == app.selected_project_index();
+        let hovered = app.hovered() == Some(HelpTarget::Project(index));
+        let background = if selected || hovered {
+            CODE_FOCUS
+        } else {
+            PANEL_ALT
+        };
+        let border = if selected { INK } else { MID_GRAY };
+        frame.render_widget(Clear, card);
+        frame.render_widget(Block::new().style(Style::new().bg(background)), card);
+        let tags = project.tags.join(" · ");
+        let mut content = vec![Line::from(Span::styled(
+            project.name,
+            Style::new().fg(INK).bold(),
+        ))];
+        if !compact {
+            content.push(Line::from(Span::styled(
+                project.description(app.language()),
+                Style::new().fg(BODY),
+            )));
+        }
+        content.push(Line::from(Span::styled(tags, Style::new().fg(MUTED))));
+        let link_style = Style::new().fg(Color::Rgb(143, 199, 242)).underlined();
+        let link_width = usize::from(card.width.saturating_sub(4));
+        if project.display_url.chars().count() > link_width {
+            if let Some(split) = project.display_url.rfind('/') {
+                let (prefix, suffix) = project.display_url.split_at(split);
+                content.push(Line::from(Span::styled(prefix, link_style)));
+                content.push(Line::from(Span::styled(suffix, link_style)));
+            } else {
+                content.push(Line::from(Span::styled(project.display_url, link_style)));
+            }
+        } else {
+            content.push(Line::from(Span::styled(project.display_url, link_style)));
+        }
+        frame.render_widget(
+            Paragraph::new(content)
+                .block(
+                    Block::new()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::new().fg(border))
+                        .title(Line::from(format!(" {:02} ", index + 1)).fg(MUTED))
+                        .padding(Padding::new(1, 1, 0, 0)),
+                )
+                .wrap(Wrap { trim: true }),
+            card,
+        );
+        paint_gradient_border(frame.buffer_mut(), card, border, MID_GRAY);
+    }
+
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Line::from(format!(" {} ", Tab::Projects.label(app.language()))).fg(INK));
+    frame.render_widget(block, area);
+    paint_gradient_border(frame.buffer_mut(), area, INK, MID_GRAY);
+}
+
 fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     frame.render_widget(Block::new().style(Style::new().bg(PANEL)), area);
     let mut lines = vec![if app.opened_article().is_some() {
@@ -741,34 +904,45 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
         ])
     }];
 
-    if app.articles_loading() || app.article_loading() {
+    if app.article_loading() {
+        let loading_width = area.width.saturating_sub(if compact { 4 } else { 6 });
+        let content_height = area.height.saturating_sub(if compact { 3 } else { 4 });
+        if content_height > DOT_WELL_ROWS.saturating_add(2) {
+            lines.push(Line::default());
+        }
+        lines.push(Line::from(Span::styled(
+            match app.language() {
+                Language::En => "Loading Markdown…",
+                Language::Ru => "Загружаем Markdown…",
+            },
+            Style::new().fg(MUTED),
+        )));
+        let loader_height = content_height
+            .saturating_sub(lines.len().min(usize::from(u16::MAX)) as u16)
+            .min(DOT_WELL_ROWS);
+        lines.extend(dot_well_lines_with_height(
+            loading_width,
+            loader_height,
+            app.article_animation_phase(),
+            false,
+            3,
+            1.35,
+        ));
+    } else if app.articles_loading() {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
             match app.language() {
-                Language::En if app.article_loading() => "Loading Markdown…",
-                Language::Ru if app.article_loading() => "Загружаем Markdown…",
                 Language::En => "Loading article names…",
                 Language::Ru => "Загружаем названия статей…",
             },
             Style::new().fg(MUTED),
         )));
-        let loading_width = area.width.saturating_sub(if compact { 4 } else { 6 });
-        if app.article_loading() {
-            lines.extend(dot_well_lines(
-                loading_width,
-                app.article_animation_phase(),
-                false,
-                3,
-                1.35,
+        for row in 0..5 {
+            lines.push(skeleton_line(
+                area.width.saturating_sub(if compact { 6 } else { 10 }),
+                row,
+                app.skeleton_phase(),
             ));
-        } else {
-            for row in 0..5 {
-                lines.push(skeleton_line(
-                    area.width.saturating_sub(if compact { 6 } else { 10 }),
-                    row,
-                    app.skeleton_phase(),
-                ));
-            }
         }
     } else if let Some(article) = app.opened_article() {
         lines.push(Line::default());
@@ -1054,11 +1228,25 @@ fn dot_well_lines(
     well_count: usize,
     well_scale: f64,
 ) -> Vec<Line<'static>> {
+    dot_well_lines_with_height(width, DOT_WELL_ROWS, phase, focused, well_count, well_scale)
+}
+
+fn dot_well_lines_with_height(
+    width: u16,
+    height: u16,
+    phase: u16,
+    focused: bool,
+    well_count: usize,
+    well_scale: f64,
+) -> Vec<Line<'static>> {
+    if height == 0 {
+        return Vec::new();
+    }
     let background = if focused { CODE_FOCUS } else { PANEL_ALT };
     let border_style = Style::new().fg(MID_GRAY).bg(background);
-    let interior_height = usize::from(DOT_WELL_ROWS.saturating_sub(2));
+    let interior_height = usize::from(height.saturating_sub(2));
     let interior_width = usize::from(width.saturating_sub(2));
-    let mut lines = Vec::with_capacity(usize::from(DOT_WELL_ROWS));
+    let mut lines = Vec::with_capacity(usize::from(height));
 
     let label = "╭─ BRAILLE DOT WELL // LIVE ";
     let label = label
@@ -1195,7 +1383,9 @@ fn dot_well_lines(
         }
     }
 
-    lines.push(code_block_bottom(width, focused));
+    if height > 1 {
+        lines.push(code_block_bottom(width, focused));
+    }
     lines
 }
 
@@ -1720,8 +1910,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
             Paragraph::new(vec![
                 Line::from(if app.opened_article().is_some() {
                     "READ  •  j/k scroll  •  Esc back"
+                } else if app.selected() == Tab::Projects {
+                    "PROJECTS  •  j/k select  •  Enter open"
                 } else {
-                    "←/→ tabs  •  1–3 jump"
+                    "←/→ tabs  •  1–4 jump"
                 })
                 .centered(),
                 Line::from(if app.authenticated() {
@@ -1744,12 +1936,24 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
             Span::styled(" BACK ", Style::new().fg(WHITE).bg(CONTROL).bold()),
             Span::styled(" Esc ", Style::new().fg(BODY)),
         ])
+    } else if app.selected() == Tab::Projects {
+        Line::from(vec![
+            Span::styled(
+                " PROJECTS ",
+                Style::new().fg(WHITE).bg(CONTROL_ACTIVE).bold(),
+            ),
+            Span::styled(" j/k select   ", Style::new().fg(BODY)),
+            Span::styled(" OPEN ", Style::new().fg(WHITE).bg(CONTROL).bold()),
+            Span::styled(" Enter/o   ", Style::new().fg(BODY)),
+            Span::styled(" TABS ", Style::new().fg(WHITE).bg(CONTROL).bold()),
+            Span::styled(" 1 2 3 4 ", Style::new().fg(BODY)),
+        ])
     } else {
         Line::from(vec![
             Span::styled(" NAV ", Style::new().fg(WHITE).bg(CONTROL_ACTIVE).bold()),
             Span::styled(" ← → / h l   ", Style::new().fg(BODY)),
             Span::styled(" TABS ", Style::new().fg(WHITE).bg(CONTROL).bold()),
-            Span::styled(" 1 2 3   ", Style::new().fg(BODY)),
+            Span::styled(" 1 2 3 4   ", Style::new().fg(BODY)),
             Span::styled(" OPEN ", Style::new().fg(WHITE).bg(CONTROL).bold()),
             Span::styled(" g x   ", Style::new().fg(BODY)),
             Span::styled(" QUIT ", Style::new().fg(MUTED)),
@@ -1825,22 +2029,32 @@ fn layout(area: Rect) -> UiLayout {
     let (logo, tabs) = if compact {
         let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
         let tab_columns = Layout::horizontal([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
         ])
         .split(rows[1]);
-        (rows[0], [tab_columns[0], tab_columns[1], tab_columns[2]])
+        (
+            rows[0],
+            [
+                tab_columns[0],
+                tab_columns[1],
+                tab_columns[2],
+                tab_columns[3],
+            ],
+        )
     } else {
         let columns = Layout::horizontal([
             Constraint::Length(15),
             Constraint::Length(11),
             Constraint::Length(12),
+            Constraint::Length(12),
             Constraint::Length(11),
             Constraint::Min(0),
         ])
         .split(inner);
-        (columns[0], [columns[1], columns[2], columns[3]])
+        (columns[0], [columns[1], columns[2], columns[3], columns[4]])
     };
 
     let status = (!compact && vertical[1].width >= 76).then(|| {
@@ -1922,8 +2136,8 @@ mod tests {
         CodeBlockAction, article_at, article_back_area, article_cursor_at, article_viewport_rows,
         code_action_areas, code_action_at, help_target_at, label_color, layout,
         markdown_image_offsets, markdown_lines, markdown_lines_with_focus, native_image_placements,
-        python_output_area, python_output_close_area, render, resume_link_area, single_line,
-        tab_at,
+        project_areas, project_at, python_output_area, python_output_close_area, render,
+        resume_link_area, single_line, tab_at,
     };
 
     #[test]
@@ -1949,7 +2163,8 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         assert_eq!(tab_at(area, 16, 1), Some(Tab::Main));
         assert_eq!(tab_at(area, 28, 1), Some(Tab::Articles));
-        assert_eq!(tab_at(area, 40, 1), Some(Tab::Info));
+        assert_eq!(tab_at(area, 40, 1), Some(Tab::Projects));
+        assert_eq!(tab_at(area, 52, 1), Some(Tab::Info));
         assert_eq!(tab_at(area, 2, 1), None);
         assert_eq!(
             help_target_at(area, 2, 1, &App::default()),
@@ -1980,8 +2195,46 @@ mod tests {
         let layout = layout(area);
         assert!(layout.compact);
         assert_eq!(tab_at(area, 3, 2), Some(Tab::Main));
-        assert_eq!(tab_at(area, 15, 2), Some(Tab::Articles));
-        assert_eq!(tab_at(area, 28, 2), Some(Tab::Info));
+        assert_eq!(tab_at(area, 12, 2), Some(Tab::Articles));
+        assert_eq!(tab_at(area, 21, 2), Some(Tab::Projects));
+        assert_eq!(tab_at(area, 30, 2), Some(Tab::Info));
+    }
+
+    #[test]
+    fn project_cards_form_a_grid_and_stack_on_compact_screens() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Projects));
+
+        let wide = Rect::new(0, 0, 100, 28);
+        let wide_cards = project_areas(wide, &app);
+        assert_eq!(wide_cards.len(), 2);
+        assert_eq!(wide_cards[0].1.top(), wide_cards[1].1.top());
+        assert!(wide_cards[0].1.right() < wide_cards[1].1.left());
+        assert_eq!(
+            project_at(wide, wide_cards[1].1.left(), wide_cards[1].1.top(), &app),
+            Some(1)
+        );
+        assert_eq!(
+            help_target_at(wide, wide_cards[0].1.left(), wide_cards[0].1.top(), &app),
+            Some(svetsec_core::HelpTarget::Project(0))
+        );
+
+        let compact = Rect::new(0, 0, 36, 24);
+        let compact_cards = project_areas(compact, &app);
+        assert_eq!(compact_cards.len(), 2);
+        assert_eq!(compact_cards[0].1.left(), compact_cards[1].1.left());
+        assert!(compact_cards[0].1.bottom() < compact_cards[1].1.top());
+
+        let backend = TestBackend::new(wide.width, wide.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (wide.top()..wide.bottom())
+            .flat_map(|y| (wide.left()..wide.right()).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(rendered.contains("T-Bank brand portal"));
+        assert!(rendered.contains("github.com/securesvet"));
+        assert!(rendered.contains("/svetsec"));
     }
 
     #[test]
@@ -2045,6 +2298,7 @@ mod tests {
             labels: Vec::new(),
         });
         let back = article_back_area(area, &article_app).expect("back target");
+        assert_eq!(back.width, "← Back".chars().count() as u16);
         assert_eq!(
             help_target_at(area, back.left(), back.top(), &article_app),
             Some(svetsec_core::HelpTarget::ArticleBack)
@@ -2053,10 +2307,42 @@ mod tests {
         let mut info_app = App::default();
         let _ = info_app.update(Message::SelectTab(Tab::Info));
         let resume = resume_link_area(area, &info_app).expect("resume target");
+        assert_eq!(resume.width, "svetsec.ru/resume".chars().count() as u16);
         assert_eq!(
             help_target_at(area, resume.left(), resume.top(), &info_app),
             Some(svetsec_core::HelpTarget::Resume)
         );
+    }
+
+    #[test]
+    fn article_loader_uses_the_full_panel_and_never_clips_its_bottom() {
+        for area in [Rect::new(0, 0, 36, 20), Rect::new(0, 0, 100, 24)] {
+            let mut app = App::default();
+            let _ = app.update(Message::SelectTab(Tab::Articles));
+            app.begin_article_load();
+            let backend = TestBackend::new(area.width, area.height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let row_text = |y| {
+                (area.left()..area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            let loader_top = (area.top()..area.bottom())
+                .find(|&y| row_text(y).contains("BRAILLE DOT WELL"))
+                .expect("loader header should be visible");
+            let compact = area.width < super::MOBILE_BREAKPOINT;
+            let content = layout(area).content;
+            let content_height = content.height.saturating_sub(if compact { 3 } else { 4 });
+            let loader_height = content_height.saturating_sub(2).min(super::DOT_WELL_ROWS);
+            let loader_bottom = loader_top + loader_height.saturating_sub(1);
+            assert!(row_text(loader_bottom).contains('╯'));
+            assert!(loader_bottom < content.bottom());
+
+            let expected_right = area.right().saturating_sub(if compact { 3 } else { 4 });
+            assert_eq!(buffer[(expected_right, loader_top)].symbol(), "╮");
+        }
     }
 
     #[test]

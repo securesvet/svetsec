@@ -110,6 +110,9 @@ pub async fn serve(
     static_dir: String,
 ) -> std::io::Result<()> {
     let index = std::path::Path::new(&static_dir).join("index.html");
+    let resume = std::path::Path::new(&static_dir)
+        .join("assets")
+        .join("resume.pdf");
     let static_files = ServeDir::new(static_dir)
         .append_index_html_on_directories(true)
         .fallback(ServeFile::new(index));
@@ -124,6 +127,7 @@ pub async fn serve(
             post(run_github_python),
         )
         .route("/api/github/assets/{*path}", get(github_asset))
+        .route_service("/resume", ServeFile::new(resume))
         .fallback_service(static_files)
         .layer(TraceLayer::new_for_http())
         .with_state(state);

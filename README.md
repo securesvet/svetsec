@@ -23,10 +23,10 @@ adds SQLite-backed owner sessions, live owner presence, and articles.
   The directory list loads first; a language file body is fetched only when
   opened. While it loads, the shared dot-well animation shows three large
   moving wells.
-- Browser history uses `/`, `/articles`, `/articles/<slug>`, and `/info`, so a
+- Browser history uses `/`, `/articles`, `/articles/<slug>`, `/projects`, and `/info`, so a
   refresh or Back/Forward navigation preserves the current screen.
 - Every browser click target has pointer and hover feedback: menu tabs, article
-  rows, code actions, and the Python output close button.
+  rows, project cards, code actions, and the Python output close button.
 - The browser UI fills the visual viewport, uses a dark palette, and keeps
   article text selectable. Open articles have a visible Back action plus large
   touch controls on phones.
@@ -38,9 +38,11 @@ adds SQLite-backed owner sessions, live owner presence, and articles.
   panel and remains there until `x` (or its close button) is used.
   Label matching is case-insensitive; unknown labels keep a deterministic
   palette color.
-- Info links to the generated PDF resume. Its Typst source lives in
+- Info links to the generated PDF resume at `/resume`. Its Typst source lives in
   `resume/resume.typ`; `.github/workflows/resume.yml` rebuilds and commits the
   web asset when that source changes.
+- Projects presents `brand.tbank.ru` and the `securesvet/svetsec` repository as
+  keyboard- and pointer-accessible cards shared by the browser and terminal UI.
 
 ## Requirements
 
@@ -192,6 +194,7 @@ The server creates the SQLite schema automatically. It contains
 - `POST /api/heartbeat`: refresh owner presence
 - `GET /api/articles`: published articles for guests, drafts included for owner
 - `POST /api/articles`: create/update by slug; owner session required
+- `GET /resume`: serve the generated PDF at the short public URL
 - `GET /api/github/articles?lang=en|ru`: Markdown directory list from the
   configured source
 - `GET /api/github/articles/:slug?lang=en|ru`: lazily loaded localized body

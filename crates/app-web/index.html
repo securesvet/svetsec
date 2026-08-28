@@ -104,12 +104,20 @@
         outline: none;
         color: #e6edf3;
         touch-action: manipulation;
-        user-select: text;
-        -webkit-user-select: text;
         -webkit-tap-highlight-color: transparent;
       }
 
-      #terminal_ratzilla_grid > pre::selection,
+      #terminal_ratzilla_grid > pre > span {
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      #terminal_ratzilla_grid > pre > span.web-selectable-text {
+        cursor: text;
+        user-select: text;
+        -webkit-user-select: text;
+      }
+
       #terminal_ratzilla_grid > pre span::selection {
         color: #f7fbff;
         background: #315d82;
@@ -200,6 +208,12 @@
         filter: brightness(1.08);
       }
 
+      .web-project-card:hover {
+        background: #182433 !important;
+        color: #f7fbff !important;
+        filter: brightness(1.08);
+      }
+
       .web-output-close:hover {
         background: #3c709b !important;
         color: #fff !important;
@@ -254,7 +268,7 @@
         .mobile-article-actions,
         .mobile-tab-actions {
           display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
+          grid-template-columns: repeat(4, minmax(0, 1fr));
           gap: 8px;
         }
 
@@ -297,6 +311,11 @@
           background: #315d82;
         }
 
+        .mobile-tab-actions a {
+          padding-inline: 4px;
+          font-size: clamp(10px, 2.8vw, 13px);
+        }
+
         #mobile-controls button:active,
         #mobile-controls a:active {
           background: #315d82;
@@ -329,6 +348,7 @@
       <nav class="mobile-tab-actions" aria-label="Primary mobile navigation">
         <a href="/" data-mobile-tab="main">Main</a>
         <a href="/articles" data-mobile-tab="articles">Articles</a>
+        <a href="/projects" data-mobile-tab="projects">Projects</a>
         <a href="/info" data-mobile-tab="info">Info</a>
       </nav>
     </div>
@@ -337,7 +357,9 @@
       <nav aria-label="Primary">
         <a href="/">Main</a>
         <a href="/articles">Articles</a>
+        <a href="/projects">Projects</a>
         <a href="/info">Info</a>
+        <a href="/resume">Resume</a>
       </nav>
       <p>A personal site about security, Rust, and systems.</p>
     </main>
