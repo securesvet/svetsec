@@ -1,9 +1,10 @@
 mod db;
 mod github;
 mod http;
+mod python;
 mod ssh;
 
-use std::{env, error::Error, net::SocketAddr};
+use std::{env, error::Error, net::SocketAddr, path::PathBuf};
 
 use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
 use db::Database;
@@ -11,6 +12,7 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let _ = dotenvy::dotenv();
     if env::args().nth(1).as_deref() == Some("hash-password") {
         let password = env::args()
             .nth(2)
@@ -40,17 +42,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let address: SocketAddr = env_or("SVETSEC_HTTP_ADDR", "127.0.0.1:3000").parse()?;
     let static_dir = env_or("SVETSEC_STATIC_DIR", "dist");
     let secure_cookie = env_or("SVETSEC_SECURE_COOKIE", "true") != "false";
+    let articles_dir = match env_or("SVETSEC_ARTICLES_SOURCE", "github").as_str() {
+        "github" => None,
+        "local" => Some(PathBuf::from(env_or("SVETSEC_ARTICLES_DIR", "articles"))),
+        _ => return Err("SVETSEC_ARTICLES_SOURCE must be `github` or `local`".into()),
+    };
     let github = github::GithubSource::new(
         &env_or("SVETSEC_GITHUB_REPOSITORY", "securesvet/svetsec"),
         env_or("SVETSEC_GITHUB_BRANCH", "main"),
         env::var("SVETSEC_GITHUB_TOKEN").ok(),
+        articles_dir,
     )?;
+    if github.is_local() {
+        tracing::info!("using local articles directory");
+    }
+    let pyodide = python::PyodideRunner::from_env();
     let http_github = github.clone();
+    let http_pyodide = pyodide.clone();
     let http_database = database.clone();
     let http_server = async move {
         http::serve(
             address,
-            http::HttpState::new(http_database, password_hash, secure_cookie, http_github),
+            http::HttpState::new(
+                http_database,
+                password_hash,
+                secure_cookie,
+                http_github,
+                http_pyodide,
+            ),
             static_dir,
         )
         .await
@@ -73,7 +92,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 owner_user,
                 owner_key,
                 host_key,
-                github
+                github,
+                pyodide
             )
         )?;
     } else {

@@ -1,6 +1,9 @@
 /target
 /dist
+/crates/app-web/dist
+/node_modules
 .DS_Store
 *.db
 *.db-shm
 *.db-wal
+.env

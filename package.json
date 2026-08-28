@@ -1,0 +1,11 @@
+{
+  "name": "svetsec-runtime",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "pyodide": "314.0.5"
+  }
+}

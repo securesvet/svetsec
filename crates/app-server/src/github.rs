@@ -1,9 +1,15 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, bail};
 use image::{GenericImageView, imageops::FilterType};
 use reqwest::{Client, header};
 use serde::{Deserialize, Serialize};
+use svetsec_core::Language;
 use tokio::sync::RwLock;
 
 const LIST_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -22,8 +28,10 @@ struct Inner {
     repository: String,
     branch: String,
     token: Option<String>,
-    list_cache: RwLock<Option<Cached<Vec<GithubArticle>>>>,
+    articles_dir: Option<PathBuf>,
+    list_cache: RwLock<HashMap<String, Cached<Vec<GithubArticle>>>>,
     body_cache: RwLock<HashMap<String, Cached<GithubArticleBody>>>,
+    markdown_cache: RwLock<HashMap<String, Cached<(String, Language)>>>,
     asset_cache: RwLock<HashMap<String, Cached<GithubAsset>>>,
 }
 
@@ -42,6 +50,7 @@ pub struct GithubArticle {
     pub edit_url: String,
     pub size: u64,
     pub sha: String,
+    pub labels: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -50,6 +59,8 @@ pub struct GithubArticleBody {
     pub title: String,
     pub markdown: String,
     pub images: Vec<GithubArticleImage>,
+    pub labels: Vec<String>,
+    pub language: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -78,7 +89,12 @@ struct ContentsEntry {
 }
 
 impl GithubSource {
-    pub fn new(repository: &str, branch: String, token: Option<String>) -> Result<Self> {
+    pub fn new(
+        repository: &str,
+        branch: String,
+        token: Option<String>,
+        articles_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         let Some((owner, repository)) = repository.split_once('/') else {
             bail!("GitHub repository must use owner/name format");
         };
@@ -90,24 +106,43 @@ impl GithubSource {
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(12))
             .build()?;
+        let articles_dir = articles_dir
+            .map(|path| {
+                path.canonicalize().with_context(|| {
+                    format!("local articles directory is missing: {}", path.display())
+                })
+            })
+            .transpose()?;
         Ok(Self(Arc::new(Inner {
             client,
             owner: owner.to_owned(),
             repository: repository.to_owned(),
             branch,
             token,
-            list_cache: RwLock::new(None),
+            articles_dir,
+            list_cache: RwLock::new(HashMap::new()),
             body_cache: RwLock::new(HashMap::new()),
+            markdown_cache: RwLock::new(HashMap::new()),
             asset_cache: RwLock::new(HashMap::new()),
         })))
     }
 
-    pub async fn list(&self, refresh: bool) -> Result<Vec<GithubArticle>> {
+    pub async fn list(&self, refresh: bool, language: Language) -> Result<Vec<GithubArticle>> {
+        if let Some(directory) = &self.0.articles_dir {
+            return self.local_list(directory, language).await;
+        }
+        let cache_key = language.path_code();
         if !refresh
-            && let Some(cache) = self.0.list_cache.read().await.as_ref()
+            && let Some(cache) = self.0.list_cache.read().await.get(cache_key)
             && cache.stored_at.elapsed() < LIST_CACHE_TTL
         {
             return Ok(cache.value.clone());
+        }
+        if refresh {
+            self.0.list_cache.write().await.clear();
+            self.0.markdown_cache.write().await.clear();
+            self.0.body_cache.write().await.clear();
+            self.0.asset_cache.write().await.clear();
         }
 
         let url = format!(
@@ -134,59 +169,70 @@ impl GithubSource {
             "https://github.com/{}/{}/edit/{}/",
             self.0.owner, self.0.repository, self.0.branch
         );
-        let mut articles = entries
-            .into_iter()
-            .filter(|entry| {
-                entry.kind == "file" && entry.name.ends_with(".md") && !entry.name.starts_with('_')
-            })
-            .filter_map(|entry| {
-                let slug = entry.name.strip_suffix(".md")?.to_owned();
-                valid_slug(&slug).then(|| GithubArticle {
+        let mut articles = Vec::new();
+        for directory in entries.into_iter().filter(|entry| {
+            entry.kind == "dir" && !entry.name.starts_with('_') && valid_slug(&entry.name)
+        }) {
+            let url = format!(
+                "https://api.github.com/repos/{}/{}/contents/{}",
+                self.0.owner, self.0.repository, directory.path
+            );
+            let variants = self
+                .request(self.0.client.get(url))
+                .query(&[("ref", &self.0.branch)])
+                .send()
+                .await
+                .context("GitHub article language list request failed")?
+                .error_for_status()
+                .context("GitHub rejected article language list request")?
+                .json::<Vec<ContentsEntry>>()
+                .await
+                .context("GitHub returned an invalid article language list")?;
+            if let Some(entry) = preferred_variant(&variants, language) {
+                let slug = directory.name;
+                articles.push(GithubArticle {
                     title_en: title_from_slug(&slug),
                     title_ru: title_from_slug(&slug),
                     slug,
                     published: true,
                     edit_url: format!("{edit_base}{}", entry.path),
-                    source_path: entry.path,
+                    source_path: entry.path.clone(),
                     size: entry.size,
-                    sha: entry.sha,
-                })
-            })
-            .collect::<Vec<_>>();
+                    sha: entry.sha.clone(),
+                    labels: Vec::new(),
+                });
+            }
+        }
         articles.sort_by(|left, right| left.slug.cmp(&right.slug));
-        *self.0.list_cache.write().await = Some(Cached {
-            value: articles.clone(),
-            stored_at: tokio::time::Instant::now(),
-        });
+        self.0.list_cache.write().await.insert(
+            cache_key.to_owned(),
+            Cached {
+                value: articles.clone(),
+                stored_at: tokio::time::Instant::now(),
+            },
+        );
         Ok(articles)
     }
 
-    pub async fn article(&self, slug: &str) -> Result<GithubArticleBody> {
+    pub async fn article(&self, slug: &str, language: Language) -> Result<GithubArticleBody> {
         if !valid_slug(slug) {
             bail!("invalid article slug");
         }
-        if let Some(cache) = self.0.body_cache.read().await.get(slug)
+        if self.0.articles_dir.is_none()
+            && let Some(cache) = self
+                .0
+                .body_cache
+                .read()
+                .await
+                .get(&cache_key(slug, language))
             && cache.stored_at.elapsed() < BODY_CACHE_TTL
         {
             return Ok(cache.value.clone());
         }
 
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/contents/articles/{slug}.md",
-            self.0.owner, self.0.repository
-        );
-        let markdown = self
-            .request(self.0.client.get(url))
-            .header(header::ACCEPT, "application/vnd.github.raw+json")
-            .query(&[("ref", &self.0.branch)])
-            .send()
-            .await
-            .context("GitHub article request failed")?
-            .error_for_status()
-            .context("GitHub rejected article request")?
-            .text()
-            .await
-            .context("GitHub returned invalid Markdown")?;
+        let (source, resolved_language) = self.markdown(slug, language).await?;
+        let labels = frontmatter_labels(&source);
+        let markdown = markdown_body(&source).to_owned();
         let mut images = Vec::new();
         for (alt, source) in markdown_images(&markdown)
             .into_iter()
@@ -202,14 +248,18 @@ impl GithubSource {
             title: markdown_title(&markdown).unwrap_or_else(|| title_from_slug(slug)),
             markdown,
             images,
+            labels,
+            language: resolved_language.path_code().to_owned(),
         };
-        self.0.body_cache.write().await.insert(
-            slug.to_owned(),
-            Cached {
-                value: article.clone(),
-                stored_at: tokio::time::Instant::now(),
-            },
-        );
+        if self.0.articles_dir.is_none() {
+            self.0.body_cache.write().await.insert(
+                cache_key(slug, language),
+                Cached {
+                    value: article.clone(),
+                    stored_at: tokio::time::Instant::now(),
+                },
+            );
+        }
         Ok(article)
     }
 
@@ -220,14 +270,62 @@ impl GithubSource {
                 self.0.owner, self.0.repository, self.0.branch, path
             ),
             None => format!(
-                "https://github.com/{}/{}/new/{}?filename=articles/new-article.md",
+                "https://github.com/{}/{}/new/{}?filename=articles/new-article/en.md",
                 self.0.owner, self.0.repository, self.0.branch
             ),
         }
     }
 
+    pub fn is_local(&self) -> bool {
+        self.0.articles_dir.is_some()
+    }
+
+    async fn markdown(&self, slug: &str, language: Language) -> Result<(String, Language)> {
+        if !valid_slug(slug) {
+            bail!("invalid article slug");
+        }
+        if let Some(directory) = &self.0.articles_dir {
+            let (path, resolved_language) = local_variant(directory, slug, language).await?;
+            return tokio::fs::read_to_string(&path)
+                .await
+                .with_context(|| format!("could not read local article: {}", path.display()))
+                .map(|markdown| (markdown, resolved_language));
+        }
+        let key = cache_key(slug, language);
+        if let Some(cache) = self.0.markdown_cache.read().await.get(&key)
+            && cache.stored_at.elapsed() < BODY_CACHE_TTL
+        {
+            return Ok(cache.value.clone());
+        }
+        let (markdown, resolved_language) = self.remote_markdown(slug, language).await?;
+        self.0.markdown_cache.write().await.insert(
+            key,
+            Cached {
+                value: (markdown.clone(), resolved_language),
+                stored_at: tokio::time::Instant::now(),
+            },
+        );
+        Ok((markdown, resolved_language))
+    }
+
     pub async fn asset(&self, source: &str) -> Result<GithubAsset> {
         let path = article_asset_path(source)?;
+        if let Some(directory) = &self.0.articles_dir {
+            let relative = path
+                .strip_prefix("articles/")
+                .context("invalid local article asset path")?;
+            let file = local_file(directory, Path::new(relative)).await?;
+            let bytes = tokio::fs::read(&file)
+                .await
+                .with_context(|| format!("could not read local image: {}", file.display()))?;
+            if bytes.len() > MAX_IMAGE_BYTES {
+                bail!("article image is larger than 5 MiB");
+            }
+            return Ok(GithubAsset {
+                content_type: image_content_type(source)?,
+                bytes: bytes.into(),
+            });
+        }
         if let Some(cache) = self.0.asset_cache.read().await.get(&path)
             && cache.stored_at.elapsed() < BODY_CACHE_TTL
         {
@@ -278,6 +376,129 @@ impl GithubSource {
         let asset = self.asset(source).await?;
         rasterize_image(source, alt, &asset.bytes)
     }
+
+    async fn remote_markdown(&self, slug: &str, language: Language) -> Result<(String, Language)> {
+        let mut last_error = None;
+        for candidate in [language, language.next()] {
+            let url = format!(
+                "https://api.github.com/repos/{}/{}/contents/articles/{slug}/{}.md",
+                self.0.owner,
+                self.0.repository,
+                candidate.path_code()
+            );
+            let response = self
+                .request(self.0.client.get(url))
+                .header(header::ACCEPT, "application/vnd.github.raw+json")
+                .query(&[("ref", &self.0.branch)])
+                .send()
+                .await
+                .context("GitHub article request failed")?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                last_error = Some(anyhow::anyhow!("article language variant is missing"));
+                continue;
+            }
+            let markdown = response
+                .error_for_status()
+                .context("GitHub rejected article request")?
+                .text()
+                .await
+                .context("GitHub returned invalid Markdown")?;
+            return Ok((markdown, candidate));
+        }
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("article is missing")))
+    }
+
+    async fn local_list(&self, directory: &Path, language: Language) -> Result<Vec<GithubArticle>> {
+        let mut entries = tokio::fs::read_dir(directory)
+            .await
+            .with_context(|| format!("could not read {}", directory.display()))?;
+        let mut articles = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let file_type = entry.file_type().await?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !file_type.is_dir() || name.starts_with('_') || !valid_slug(&name) {
+                continue;
+            }
+            let Some((path, resolved_language)) =
+                local_variant_optional(directory, &name, language).await?
+            else {
+                continue;
+            };
+            let metadata = tokio::fs::metadata(&path).await?;
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_nanos());
+            let source_path = format!("articles/{name}/{}.md", resolved_language.path_code());
+            articles.push(GithubArticle {
+                title_en: title_from_slug(&name),
+                title_ru: title_from_slug(&name),
+                edit_url: self.editor_url(Some(&source_path)),
+                source_path,
+                size: metadata.len(),
+                sha: format!("local-{}-{modified}", metadata.len()),
+                slug: name,
+                published: true,
+                labels: Vec::new(),
+            });
+        }
+        articles.sort_by(|left, right| left.slug.cmp(&right.slug));
+        Ok(articles)
+    }
+}
+
+fn preferred_variant(entries: &[ContentsEntry], language: Language) -> Option<&ContentsEntry> {
+    [language, language.next()]
+        .into_iter()
+        .find_map(|candidate| {
+            let filename = format!("{}.md", candidate.path_code());
+            entries
+                .iter()
+                .find(|entry| entry.kind == "file" && entry.name == filename)
+        })
+}
+
+fn cache_key(slug: &str, language: Language) -> String {
+    format!("{slug}:{}", language.path_code())
+}
+
+async fn local_variant(
+    directory: &Path,
+    slug: &str,
+    language: Language,
+) -> Result<(PathBuf, Language)> {
+    local_variant_optional(directory, slug, language)
+        .await?
+        .with_context(|| format!("article {slug} has no en.md or ru.md"))
+}
+
+async fn local_variant_optional(
+    directory: &Path,
+    slug: &str,
+    language: Language,
+) -> Result<Option<(PathBuf, Language)>> {
+    for candidate in [language, language.next()] {
+        let relative = PathBuf::from(slug).join(format!("{}.md", candidate.path_code()));
+        if tokio::fs::try_exists(directory.join(&relative)).await? {
+            return local_file(directory, &relative)
+                .await
+                .map(|path| Some((path, candidate)));
+        }
+    }
+    Ok(None)
+}
+
+async fn local_file(directory: &Path, relative: &Path) -> Result<PathBuf> {
+    let path = tokio::fs::canonicalize(directory.join(relative))
+        .await
+        .with_context(|| format!("local article file is missing: {}", relative.display()))?;
+    if !path.starts_with(directory) {
+        bail!("local article path escapes its configured directory");
+    }
+    Ok(path)
 }
 
 fn markdown_images(markdown: &str) -> Vec<(String, String)> {
@@ -318,13 +539,23 @@ fn image_content_type(source: &str) -> Result<&'static str> {
 }
 
 fn rasterize_image(source: &str, alt: &str, bytes: &[u8]) -> Result<GithubArticleImage> {
+    rasterize_image_with_bounds(source, alt, bytes, IMAGE_WIDTH, IMAGE_PIXEL_HEIGHT)
+}
+
+pub(crate) fn rasterize_image_with_bounds(
+    source: &str,
+    alt: &str,
+    bytes: &[u8],
+    max_width: u32,
+    max_height: u32,
+) -> Result<GithubArticleImage> {
     let source_image = image::load_from_memory(bytes).context("unsupported article image")?;
     let (source_width, source_height) = source_image.dimensions();
     if source_width == 0 || source_height == 0 {
         bail!("empty article image");
     }
-    let scale = (IMAGE_WIDTH as f64 / f64::from(source_width))
-        .min(IMAGE_PIXEL_HEIGHT as f64 / f64::from(source_height))
+    let scale = (f64::from(max_width) / f64::from(source_width))
+        .min(f64::from(max_height) / f64::from(source_height))
         .min(1.0);
     let width = (f64::from(source_width) * scale).round().max(1.0) as u32;
     let height = (f64::from(source_height) * scale).round().max(1.0) as u32;
@@ -386,13 +617,88 @@ fn markdown_title(markdown: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn markdown_body(markdown: &str) -> &str {
+    let mut lines = markdown.split_inclusive('\n');
+    let Some(first) = lines.next() else {
+        return markdown;
+    };
+    if first.trim() != "---" {
+        return markdown;
+    }
+    let mut offset = first.len();
+    for line in lines {
+        offset += line.len();
+        if line.trim() == "---" {
+            return &markdown[offset..];
+        }
+    }
+    markdown
+}
+
+fn frontmatter_labels(markdown: &str) -> Vec<String> {
+    let mut lines = markdown.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return Vec::new();
+    }
+    let mut labels = Vec::new();
+    let mut reading_labels = false;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("labels:") {
+            reading_labels = true;
+            let value = value.trim();
+            if let Some(inner) = value
+                .strip_prefix('[')
+                .and_then(|value| value.strip_suffix(']'))
+            {
+                for label in inner.split(',') {
+                    push_label(&mut labels, label);
+                }
+                reading_labels = false;
+            } else if !value.is_empty() {
+                push_label(&mut labels, value);
+                reading_labels = false;
+            }
+        } else if reading_labels {
+            if let Some(label) = trimmed.strip_prefix('-') {
+                push_label(&mut labels, label);
+            } else if !trimmed.is_empty() {
+                reading_labels = false;
+            }
+        }
+    }
+    labels
+}
+
+fn push_label(labels: &mut Vec<String>, value: &str) {
+    let value = value.trim().trim_matches(['\'', '"']);
+    if labels.len() >= 6
+        || value.is_empty()
+        || value.chars().count() > 24
+        || value.chars().any(char::is_control)
+        || labels
+            .iter()
+            .any(|label| label.to_lowercase() == value.to_lowercase())
+    {
+        return;
+    }
+    labels.push(value.to_owned());
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
+    use svetsec_core::Language;
+    use uuid::Uuid;
 
     use super::{
-        article_asset_path, markdown_images, markdown_title, rasterize_image, title_from_slug,
-        valid_slug,
+        GithubSource, article_asset_path, frontmatter_labels, markdown_body, markdown_images,
+        markdown_title, rasterize_image, title_from_slug, valid_slug,
     };
 
     #[test]
@@ -418,6 +724,28 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_labels_support_lists_and_case_insensitive_deduplication() {
+        assert_eq!(
+            frontmatter_labels(
+                "---\nlabels:\n  - cryptography\n  - CRYPTOGRAPHY\n  - Rust\n---\n# Title"
+            ),
+            vec!["cryptography", "Rust"]
+        );
+        assert_eq!(
+            frontmatter_labels("---\nlabels: [cryptography, python]\n---\n# Title"),
+            vec!["cryptography", "python"]
+        );
+        assert_eq!(
+            frontmatter_labels("---\nlabels: [Криптография, КРИПТОГРАФИЯ]\n---\n# Title"),
+            vec!["Криптография"]
+        );
+        assert_eq!(
+            markdown_body("---\nlabels: [cryptography]\n---\n# Visible title"),
+            "# Visible title"
+        );
+    }
+
+    #[test]
     fn images_are_reduced_to_rgb_terminal_pixels() {
         let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(64, 64, Rgba([1, 2, 3, 255])));
         let mut bytes = Vec::new();
@@ -428,5 +756,79 @@ mod tests {
         assert_eq!((image.width, image.height), (32, 32));
         assert_eq!(image.pixels.len(), 32 * 32 * 3);
         assert_eq!(&image.pixels[..3], &[1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn local_source_reads_current_articles_without_github_cache() {
+        let directory = std::env::temp_dir().join(format!("svetsec-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(directory.join("assets"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(directory.join("hello-local"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            directory.join("hello-local/en.md"),
+            "---\nlabels: [cryptography]\n---\n# Local title\n\nFirst version\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(directory.join("_FORMAT.md"), "# Hidden")
+            .await
+            .unwrap();
+        tokio::fs::write(directory.join("assets/example.png"), [1, 2, 3])
+            .await
+            .unwrap();
+
+        let source = GithubSource::new(
+            "securesvet/svetsec",
+            "main".into(),
+            None,
+            Some(PathBuf::from(&directory)),
+        )
+        .unwrap();
+        let articles = source.list(false, Language::Ru).await.unwrap();
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].slug, "hello-local");
+        assert!(articles[0].source_path.ends_with("/en.md"));
+        let article = source.article("hello-local", Language::Ru).await.unwrap();
+        assert_eq!(article.title, "Local title");
+        assert_eq!(article.labels, ["cryptography"]);
+        assert_eq!(article.language, "en");
+        assert!(!article.markdown.contains("labels:"));
+        assert_eq!(
+            source
+                .asset("assets/example.png")
+                .await
+                .unwrap()
+                .bytes
+                .len(),
+            3
+        );
+
+        tokio::fs::write(directory.join("hello-local/en.md"), "# Updated locally\n")
+            .await
+            .unwrap();
+        assert_eq!(
+            source
+                .article("hello-local", Language::En)
+                .await
+                .unwrap()
+                .title,
+            "Updated locally"
+        );
+
+        tokio::fs::write(
+            directory.join("hello-local/ru.md"),
+            "# Локальный заголовок\n",
+        )
+        .await
+        .unwrap();
+        let articles = source.list(false, Language::Ru).await.unwrap();
+        assert!(articles[0].source_path.ends_with("/ru.md"));
+        let article = source.article("hello-local", Language::Ru).await.unwrap();
+        assert_eq!(article.title, "Локальный заголовок");
+        assert_eq!(article.language, "ru");
+        tokio::fs::remove_dir_all(directory).await.unwrap();
     }
 }

@@ -1,4 +1,9 @@
+use vim_line::{Key as VimKey, KeyCode as VimKeyCode, LineEditor, VimLineEditor};
+
 pub const SITE_URL: &str = "https://svetsec.ru";
+pub const DOT_WELL_LANGUAGE: &str = "dot-well";
+pub const DOT_WELL_ROWS: u16 = 13;
+pub const DOT_WELL_FRAMES: u16 = 120;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Language {
@@ -31,6 +36,23 @@ impl Language {
         match self {
             Self::En => Self::Ru,
             Self::Ru => Self::En,
+        }
+    }
+
+    #[must_use]
+    pub fn from_code(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "en" => Some(Self::En),
+            "ru" => Some(Self::Ru),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn path_code(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::Ru => "ru",
         }
     }
 }
@@ -111,6 +133,10 @@ pub enum HelpTarget {
     Language(Language),
     Status,
     Articles,
+    Article(usize),
+    CodeRun(usize),
+    CodeCopy(usize),
+    PythonOutputClose,
 }
 
 impl HelpTarget {
@@ -133,6 +159,14 @@ impl HelpTarget {
             (Self::Status, Language::Ru, _) => "Состояние сессии и подключения.",
             (Self::Articles, Language::En, _) => "Owner-only article workspace.",
             (Self::Articles, Language::Ru, _) => "Редактор статей, доступный только владельцу.",
+            (Self::Article(_), Language::En, _) => "Open this article.",
+            (Self::Article(_), Language::Ru, _) => "Открыть эту статью.",
+            (Self::CodeRun(_), Language::En, _) => "Run this Python block.",
+            (Self::CodeRun(_), Language::Ru, _) => "Запустить этот Python-блок.",
+            (Self::CodeCopy(_), Language::En, _) => "Copy this code block.",
+            (Self::CodeCopy(_), Language::Ru, _) => "Скопировать этот блок кода.",
+            (Self::PythonOutputClose, Language::En, _) => "Close Python output.",
+            (Self::PythonOutputClose, Language::Ru, _) => "Закрыть вывод Python.",
         }
     }
 }
@@ -151,14 +185,41 @@ pub enum Message {
     NextArticle,
     PreviousArticle,
     SelectArticle(usize),
+    SelectArticleCursor(u16),
+    SelectArticlePosition { row: u16, column: u16 },
     ScrollArticleDown,
     ScrollArticleUp,
+    MoveArticleCursorLeft,
+    MoveArticleCursorRight,
+    MoveArticleCursorToLineStart,
+    MoveArticleCursorToLineEnd,
+    MoveArticleCursorToDocumentStart,
+    MoveArticleCursorToDocumentEnd,
+    EnterArticleVim,
+    ExitArticleVim,
+    ArticleVimInput(ArticleVimKey),
+    DismissPythonOutput,
+    BeginArticleG,
+    CompleteArticleG,
     CloseArticle,
     AdvanceSkeleton,
+    AdvanceArticleAnimation,
     BeginSiteShortcut,
     CompleteSiteShortcut,
     CancelShortcut,
     Quit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArticleVimKey {
+    Char(char),
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    Escape,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +235,7 @@ pub struct ArticleSummary {
     pub published: bool,
     pub source_path: Option<String>,
     pub edit_url: Option<String>,
+    pub labels: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -191,6 +253,57 @@ pub struct ArticleContent {
     pub title: String,
     pub markdown: String,
     pub images: Vec<ArticleImage>,
+    pub labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarkdownCodeBlock {
+    pub index: usize,
+    pub language: String,
+    pub code: String,
+}
+
+impl MarkdownCodeBlock {
+    #[must_use]
+    pub fn executable(&self) -> bool {
+        matches!(self.language.as_str(), "python" | "python3" | "py")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArticleCodeBlock {
+    pub index: usize,
+    pub language: String,
+    pub code: String,
+    pub start_row: u16,
+    pub end_row: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArticleVimSelection {
+    pub row: u16,
+    pub start_column: u16,
+    pub end_column: u16,
+}
+
+impl ArticleCodeBlock {
+    #[must_use]
+    pub fn executable(&self) -> bool {
+        matches!(self.language.as_str(), "python" | "python3" | "py")
+    }
+
+    #[must_use]
+    pub fn animated(&self) -> bool {
+        self.language == DOT_WELL_LANGUAGE
+    }
+}
+
+struct ArticleNavigation {
+    total_rows: u16,
+    cursor_start: u16,
+    code_blocks: Vec<ArticleCodeBlock>,
+    row_widths: Vec<u16>,
+    rows: Vec<String>,
 }
 
 impl ArticleSummary {
@@ -203,7 +316,7 @@ impl ArticleSummary {
     }
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default)]
 pub struct App {
     selected: Tab,
     language: Language,
@@ -217,12 +330,25 @@ pub struct App {
     opened_article: Option<ArticleContent>,
     articles_error: Option<String>,
     article_create_url: Option<String>,
+    profile_image: Option<ArticleImage>,
+    python_running: bool,
+    python_output: Option<String>,
+    article_vim_mode: bool,
+    article_vim: VimLineEditor,
+    article_vim_count: u16,
     skeleton_phase: u8,
+    article_animation_phase: u16,
     article_scroll: u16,
+    article_scroll_limit: u16,
+    article_viewport_rows: u16,
+    article_cursor: u16,
+    article_cursor_column: u16,
+    article_preferred_column: u16,
     language_notice: bool,
     language_notice_generation: u64,
     hovered: Option<HelpTarget>,
     awaiting_site_key: bool,
+    awaiting_article_g: bool,
     should_quit: bool,
 }
 
@@ -235,6 +361,11 @@ impl App {
     #[must_use]
     pub const fn language(&self) -> Language {
         self.language
+    }
+
+    pub fn restore_language(&mut self, language: Language) {
+        self.language = language;
+        self.language_notice = false;
     }
 
     #[must_use]
@@ -274,6 +405,147 @@ impl App {
 
     pub fn set_article_create_url(&mut self, url: String) {
         self.article_create_url = Some(url);
+    }
+
+    pub fn set_profile_image(&mut self, image: ArticleImage) {
+        self.profile_image = Some(image);
+    }
+
+    #[must_use]
+    pub const fn profile_image(&self) -> Option<&ArticleImage> {
+        self.profile_image.as_ref()
+    }
+
+    #[must_use]
+    pub fn python_code(&self) -> Option<String> {
+        let block = self.focused_code_block()?;
+        block.executable().then_some(block.code)
+    }
+
+    #[must_use]
+    pub fn focused_code_block(&self) -> Option<ArticleCodeBlock> {
+        let cursor = self.article_cursor;
+        self.article_navigation()?
+            .code_blocks
+            .into_iter()
+            .find(|block| (block.start_row..=block.end_row).contains(&cursor))
+    }
+
+    #[must_use]
+    pub fn article_code_block(&self, index: usize) -> Option<ArticleCodeBlock> {
+        self.article_navigation()?
+            .code_blocks
+            .into_iter()
+            .find(|block| block.index == index)
+    }
+
+    #[must_use]
+    pub const fn article_cursor(&self) -> u16 {
+        self.article_cursor
+    }
+
+    #[must_use]
+    pub const fn article_cursor_column(&self) -> u16 {
+        self.article_cursor_column
+    }
+
+    #[must_use]
+    pub fn article_line_width(&self, row: u16) -> u16 {
+        self.article_navigation()
+            .and_then(|layout| layout.row_widths.get(usize::from(row)).copied())
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    #[must_use]
+    pub const fn article_scroll_limit(&self) -> u16 {
+        self.article_scroll_limit
+    }
+
+    #[must_use]
+    pub fn article_total_rows(&self) -> u16 {
+        self.article_navigation()
+            .map_or(0, |layout| layout.total_rows)
+    }
+
+    pub fn set_article_viewport_rows(&mut self, rows: u16) {
+        self.article_viewport_rows = rows.max(1);
+        self.refresh_article_bounds();
+    }
+
+    #[must_use]
+    pub const fn python_running(&self) -> bool {
+        self.python_running
+    }
+
+    #[must_use]
+    pub fn python_output(&self) -> Option<&str> {
+        self.python_output.as_deref()
+    }
+
+    pub fn begin_python_run(&mut self) {
+        self.python_running = true;
+        self.python_output = None;
+        self.refresh_article_bounds();
+    }
+
+    pub fn finish_python_run(&mut self, output: impl Into<String>) {
+        self.python_running = false;
+        self.python_output = Some(output.into());
+        self.refresh_article_bounds();
+    }
+
+    #[must_use]
+    pub const fn article_vim_mode(&self) -> bool {
+        self.article_vim_mode
+    }
+
+    #[must_use]
+    pub fn article_vim_status(&self) -> &'static str {
+        match self.article_vim.status() {
+            "VISUAL" => "VISUAL RO",
+            _ => "NORMAL RO",
+        }
+    }
+
+    #[must_use]
+    pub const fn article_vim_count(&self) -> u16 {
+        self.article_vim_count
+    }
+
+    #[must_use]
+    pub fn article_vim_selection(&self) -> Vec<ArticleVimSelection> {
+        if !self.article_vim_mode {
+            return Vec::new();
+        }
+        let Some(selection) = self.article_vim.selection() else {
+            return Vec::new();
+        };
+        let Some(layout) = self.article_navigation() else {
+            return Vec::new();
+        };
+        let mut row_start = 0_usize;
+        let mut selections = Vec::new();
+        for (index, line) in layout.rows[usize::from(layout.cursor_start)..]
+            .iter()
+            .enumerate()
+        {
+            let row_end = row_start.saturating_add(line.len());
+            let start = selection.start.max(row_start).min(row_end);
+            let end = selection.end.max(row_start).min(row_end);
+            if start < end {
+                let start_column = line[..start - row_start].chars().count();
+                let end_column = line[..end - row_start].chars().count();
+                selections.push(ArticleVimSelection {
+                    row: (usize::from(layout.cursor_start) + index).min(usize::from(u16::MAX))
+                        as u16,
+                    start_column: start_column.min(usize::from(u16::MAX)) as u16,
+                    end_column: end_column.min(usize::from(u16::MAX)) as u16,
+                });
+            }
+            row_start = row_end.saturating_add(1);
+        }
+        selections
     }
 
     #[must_use]
@@ -329,6 +601,25 @@ impl App {
     }
 
     #[must_use]
+    pub const fn article_animation_phase(&self) -> u16 {
+        self.article_animation_phase
+    }
+
+    #[must_use]
+    pub fn article_has_animation(&self) -> bool {
+        self.opened_article.as_ref().is_some_and(|article| {
+            markdown_code_blocks(&article.markdown)
+                .iter()
+                .any(|block| block.language == DOT_WELL_LANGUAGE)
+        })
+    }
+
+    #[must_use]
+    pub fn article_animation_active(&self) -> bool {
+        self.article_loading || self.article_has_animation()
+    }
+
+    #[must_use]
     pub const fn article_scroll(&self) -> u16 {
         self.article_scroll
     }
@@ -344,10 +635,29 @@ impl App {
     }
 
     pub fn set_opened_article(&mut self, article: ArticleContent) {
+        if let Some(summary) = self
+            .articles
+            .iter_mut()
+            .find(|summary| summary.slug == article.slug)
+        {
+            summary.labels.clone_from(&article.labels);
+        }
         self.opened_article = Some(article);
         self.article_loading = false;
         self.articles_error = None;
         self.article_scroll = 0;
+        self.article_scroll_limit = 0;
+        self.python_running = false;
+        self.python_output = None;
+        self.article_vim_mode = false;
+        self.article_vim.reset();
+        self.article_vim_count = 0;
+        self.article_animation_phase = 0;
+        self.article_cursor = self
+            .article_navigation()
+            .map_or(0, |layout| layout.cursor_start);
+        self.article_cursor_column = 0;
+        self.article_preferred_column = 0;
     }
 
     pub fn set_articles_error(&mut self, error: impl Into<String>) {
@@ -371,12 +681,23 @@ impl App {
         self.awaiting_site_key
     }
 
+    #[must_use]
+    pub const fn awaiting_article_g(&self) -> bool {
+        self.awaiting_article_g
+    }
+
     pub fn update(&mut self, message: Message) -> Option<Effect> {
         if !matches!(
             message,
             Message::BeginSiteShortcut | Message::CompleteSiteShortcut
         ) {
             self.awaiting_site_key = false;
+        }
+        if !matches!(
+            message,
+            Message::BeginArticleG | Message::CompleteArticleG | Message::ArticleVimInput(_)
+        ) {
+            self.awaiting_article_g = false;
         }
 
         match message {
@@ -421,18 +742,65 @@ impl App {
                     self.selected_article = index;
                 }
             }
-            Message::ScrollArticleDown => {
-                self.article_scroll = self.article_scroll.saturating_add(1);
+            Message::SelectArticleCursor(row) => self.select_article_cursor(row),
+            Message::SelectArticlePosition { row, column } => {
+                self.select_article_position(row, column);
             }
-            Message::ScrollArticleUp => {
-                self.article_scroll = self.article_scroll.saturating_sub(1);
+            Message::ScrollArticleDown => self.move_article_cursor(1),
+            Message::ScrollArticleUp => self.move_article_cursor(-1),
+            Message::MoveArticleCursorLeft => self.move_article_cursor_horizontal(-1),
+            Message::MoveArticleCursorRight => self.move_article_cursor_horizontal(1),
+            Message::MoveArticleCursorToLineStart => self.move_article_cursor_to_edge(false),
+            Message::MoveArticleCursorToLineEnd => self.move_article_cursor_to_edge(true),
+            Message::MoveArticleCursorToDocumentStart => {
+                self.move_article_cursor_to_document(false)
+            }
+            Message::MoveArticleCursorToDocumentEnd => self.move_article_cursor_to_document(true),
+            Message::EnterArticleVim => {
+                if self.opened_article.is_some() {
+                    self.article_vim.reset();
+                    self.sync_article_vim_from_cursor();
+                    self.article_vim_count = 0;
+                    self.article_vim_mode = true;
+                }
+            }
+            Message::ExitArticleVim => self.exit_article_vim(),
+            Message::ArticleVimInput(key) => self.handle_article_vim_input(key),
+            Message::DismissPythonOutput => {
+                self.python_running = false;
+                self.python_output = None;
+                self.refresh_article_bounds();
+            }
+            Message::BeginArticleG => self.awaiting_article_g = true,
+            Message::CompleteArticleG => {
+                if self.awaiting_article_g {
+                    self.move_article_cursor_to_document(false);
+                }
+                self.awaiting_article_g = false;
             }
             Message::CloseArticle => {
                 self.opened_article = None;
                 self.article_scroll = 0;
+                self.article_scroll_limit = 0;
+                self.article_cursor = 0;
+                self.article_cursor_column = 0;
+                self.article_preferred_column = 0;
+                self.python_running = false;
+                self.python_output = None;
+                self.article_vim_mode = false;
+                self.article_vim.reset();
+                self.article_vim_count = 0;
+                self.awaiting_article_g = false;
+                self.article_animation_phase = 0;
             }
             Message::AdvanceSkeleton => {
                 self.skeleton_phase = self.skeleton_phase.wrapping_add(1) % 24;
+            }
+            Message::AdvanceArticleAnimation => {
+                if self.article_animation_active() {
+                    self.article_animation_phase =
+                        self.article_animation_phase.wrapping_add(1) % DOT_WELL_FRAMES;
+                }
             }
             Message::BeginSiteShortcut => self.awaiting_site_key = true,
             Message::CompleteSiteShortcut => {
@@ -451,11 +819,549 @@ impl App {
         self.language_notice = true;
         self.language_notice_generation = self.language_notice_generation.wrapping_add(1);
     }
+
+    fn exit_article_vim(&mut self) {
+        self.article_vim_mode = false;
+        self.article_vim.reset();
+        self.article_vim_count = 0;
+        self.awaiting_article_g = false;
+    }
+
+    fn handle_article_vim_input(&mut self, key: ArticleVimKey) {
+        if !self.article_vim_mode {
+            return;
+        }
+
+        if key == ArticleVimKey::Escape {
+            if self.article_vim.status() == "NORMAL" {
+                self.exit_article_vim();
+            } else {
+                self.feed_article_vim_key(VimKey::code(VimKeyCode::Escape), 1);
+                self.article_vim_count = 0;
+                self.awaiting_article_g = false;
+            }
+            return;
+        }
+
+        let key = match key {
+            ArticleVimKey::Char(character) => {
+                ArticleVimKey::Char(normalize_article_vim_character(character))
+            }
+            other => other,
+        };
+
+        if let ArticleVimKey::Char(digit @ '0'..='9') = key
+            && (digit != '0' || self.article_vim_count > 0)
+        {
+            self.article_vim_count = self
+                .article_vim_count
+                .saturating_mul(10)
+                .saturating_add(digit.to_digit(10).unwrap_or_default() as u16)
+                .min(999);
+            self.awaiting_article_g = false;
+            return;
+        }
+
+        if key == ArticleVimKey::Char('g') {
+            if self.awaiting_article_g {
+                self.move_article_cursor_to_document(false);
+                self.sync_article_vim_from_cursor();
+                self.awaiting_article_g = false;
+                self.article_vim_count = 0;
+            } else {
+                self.awaiting_article_g = true;
+            }
+            return;
+        }
+
+        if key == ArticleVimKey::Char('G') {
+            self.move_article_cursor_to_document(true);
+            self.sync_article_vim_from_cursor();
+            self.awaiting_article_g = false;
+            self.article_vim_count = 0;
+            return;
+        }
+
+        if matches!(key, ArticleVimKey::Char('j') | ArticleVimKey::Down)
+            || matches!(key, ArticleVimKey::Char('k') | ArticleVimKey::Up)
+        {
+            let delta = if matches!(key, ArticleVimKey::Char('j') | ArticleVimKey::Down) {
+                1
+            } else {
+                -1
+            };
+            for _ in 0..self.article_vim_count.max(1) {
+                self.move_article_cursor(delta);
+            }
+            self.sync_article_vim_from_cursor();
+            self.article_vim_count = 0;
+            self.awaiting_article_g = false;
+            return;
+        }
+
+        let engine_key = match key {
+            ArticleVimKey::Char(character)
+                if matches!(
+                    character,
+                    'h' | 'j'
+                        | 'k'
+                        | 'l'
+                        | 'w'
+                        | 'b'
+                        | 'e'
+                        | 'W'
+                        | 'B'
+                        | 'E'
+                        | '0'
+                        | '^'
+                        | '$'
+                        | '%'
+                        | 'v'
+                ) =>
+            {
+                VimKey::char(character)
+            }
+            ArticleVimKey::Up => VimKey::char('k'),
+            ArticleVimKey::Down => VimKey::char('j'),
+            ArticleVimKey::Left => VimKey::code(VimKeyCode::Left),
+            ArticleVimKey::Right => VimKey::code(VimKeyCode::Right),
+            ArticleVimKey::Home => VimKey::code(VimKeyCode::Home),
+            ArticleVimKey::End => VimKey::code(VimKeyCode::End),
+            _ => {
+                self.article_vim_count = 0;
+                self.awaiting_article_g = false;
+                return;
+            }
+        };
+        let repetitions = if key == ArticleVimKey::Char('v') {
+            1
+        } else {
+            self.article_vim_count.max(1)
+        };
+        self.feed_article_vim_key(engine_key, repetitions);
+        self.article_vim_count = 0;
+        self.awaiting_article_g = false;
+    }
+
+    fn feed_article_vim_key(&mut self, key: VimKey, repetitions: u16) {
+        let Some(layout) = self.article_navigation() else {
+            return;
+        };
+        let document = article_vim_document(&layout);
+        let offset = article_vim_offset(&layout, self.article_cursor, self.article_cursor_column);
+        self.article_vim.set_cursor(offset, &document);
+        for _ in 0..repetitions {
+            let _ = self.article_vim.handle_key(key, &document);
+        }
+        let (row, column) = article_vim_position(&layout, self.article_vim.cursor());
+        self.article_cursor = row;
+        self.article_cursor_column = column;
+        self.article_preferred_column = column;
+        self.ensure_article_cursor_visible();
+    }
+
+    fn sync_article_vim_from_cursor(&mut self) {
+        let Some(layout) = self.article_navigation() else {
+            return;
+        };
+        let document = article_vim_document(&layout);
+        let offset = article_vim_offset(&layout, self.article_cursor, self.article_cursor_column);
+        self.article_vim.set_cursor(offset, &document);
+    }
+
+    fn select_article_cursor(&mut self, row: u16) {
+        let Some(layout) = self.article_navigation() else {
+            return;
+        };
+        self.article_cursor = row.clamp(
+            layout.cursor_start,
+            layout.total_rows.saturating_sub(1).max(layout.cursor_start),
+        );
+        self.article_cursor_column = self.article_cursor_column.min(
+            layout.row_widths[usize::from(self.article_cursor)]
+                .max(1)
+                .saturating_sub(1),
+        );
+        self.article_preferred_column = self.article_cursor_column;
+        self.ensure_article_cursor_visible();
+    }
+
+    fn select_article_position(&mut self, row: u16, column: u16) {
+        let Some(layout) = self.article_navigation() else {
+            return;
+        };
+        self.article_cursor = row.clamp(
+            layout.cursor_start,
+            layout.total_rows.saturating_sub(1).max(layout.cursor_start),
+        );
+        self.article_cursor_column = column.min(
+            layout.row_widths[usize::from(self.article_cursor)]
+                .max(1)
+                .saturating_sub(1),
+        );
+        self.article_preferred_column = self.article_cursor_column;
+        self.ensure_article_cursor_visible();
+    }
+
+    fn move_article_cursor(&mut self, delta: i16) {
+        let Some(layout) = self.article_navigation() else {
+            return;
+        };
+        let end = layout.total_rows.saturating_sub(1).max(layout.cursor_start);
+        self.article_cursor = self
+            .article_cursor
+            .saturating_add_signed(delta)
+            .clamp(layout.cursor_start, end);
+        self.article_cursor_column = self.article_preferred_column.min(
+            layout.row_widths[usize::from(self.article_cursor)]
+                .max(1)
+                .saturating_sub(1),
+        );
+        self.ensure_article_cursor_visible();
+    }
+
+    fn move_article_cursor_horizontal(&mut self, delta: i16) {
+        let width = self.article_line_width(self.article_cursor);
+        self.article_cursor_column = self
+            .article_cursor_column
+            .saturating_add_signed(delta)
+            .min(width.saturating_sub(1));
+        self.article_preferred_column = self.article_cursor_column;
+    }
+
+    fn move_article_cursor_to_edge(&mut self, end: bool) {
+        self.article_cursor_column = if end {
+            self.article_line_width(self.article_cursor)
+                .saturating_sub(1)
+        } else {
+            0
+        };
+        self.article_preferred_column = self.article_cursor_column;
+    }
+
+    fn move_article_cursor_to_document(&mut self, end: bool) {
+        let Some(layout) = self.article_navigation() else {
+            return;
+        };
+        self.article_cursor = if end {
+            layout.total_rows.saturating_sub(1)
+        } else {
+            layout.cursor_start
+        };
+        self.article_cursor_column = 0;
+        self.article_preferred_column = 0;
+        self.ensure_article_cursor_visible();
+    }
+
+    fn ensure_article_cursor_visible(&mut self) {
+        let viewport = self.article_viewport_rows.max(1);
+        if self.article_cursor < self.article_scroll {
+            self.article_scroll = self.article_cursor;
+        } else if self.article_cursor >= self.article_scroll.saturating_add(viewport) {
+            self.article_scroll = self
+                .article_cursor
+                .saturating_add(1)
+                .saturating_sub(viewport);
+        }
+        self.article_scroll = self.article_scroll.min(self.article_scroll_limit);
+    }
+
+    fn refresh_article_bounds(&mut self) {
+        let total_rows = self.article_total_rows();
+        self.article_scroll_limit = total_rows.saturating_sub(self.article_viewport_rows.max(1));
+        self.article_scroll = self.article_scroll.min(self.article_scroll_limit);
+        if total_rows > 0 {
+            self.article_cursor = self.article_cursor.min(total_rows - 1);
+            self.article_cursor_column = self.article_cursor_column.min(
+                self.article_line_width(self.article_cursor)
+                    .saturating_sub(1),
+            );
+        }
+    }
+
+    fn article_navigation(&self) -> Option<ArticleNavigation> {
+        let article = self.opened_article.as_ref()?;
+        let raw_blocks = markdown_code_blocks(&article.markdown);
+        let mut code_blocks = Vec::new();
+        let mut rows = vec![
+            "● SYNC  //  GITHUB main/articles".to_owned(),
+            String::new(),
+            article.title.clone(),
+        ];
+        if !article.labels.is_empty() {
+            rows.push(
+                article
+                    .labels
+                    .iter()
+                    .take(3)
+                    .fold(String::new(), |mut labels, label| {
+                        labels.push(' ');
+                        labels.push_str(label);
+                        labels.push_str("  ");
+                        labels
+                    }),
+            );
+        }
+        rows.push(String::new());
+        let cursor_start = 2;
+        let mut front_matter = false;
+        let mut active_block = None::<(usize, u16, bool)>;
+        let mut block_index = 0_usize;
+
+        for (line_index, raw) in article.markdown.lines().enumerate() {
+            if raw.trim() == "---" && (line_index == 0 || front_matter) {
+                front_matter = !front_matter;
+                continue;
+            }
+            if front_matter {
+                continue;
+            }
+            if let Some(language) = fence_language(raw) {
+                if let Some((index, start_row, animated)) = active_block.take() {
+                    if !animated {
+                        rows.push(format!("╰{}╯", "─".repeat(22)));
+                    }
+                    if let Some(block) = raw_blocks.get(index) {
+                        code_blocks.push(ArticleCodeBlock {
+                            index: block.index,
+                            language: block.language.clone(),
+                            code: block.code.clone(),
+                            start_row,
+                            end_row: rows.len().saturating_sub(1) as u16,
+                        });
+                    }
+                    block_index += 1;
+                } else {
+                    let animated = language == DOT_WELL_LANGUAGE;
+                    active_block = Some((block_index, rows.len() as u16, animated));
+                    if animated {
+                        rows.extend(std::iter::repeat_n(
+                            " ".repeat(24),
+                            usize::from(DOT_WELL_ROWS),
+                        ));
+                    } else {
+                        let language = if language.is_empty() {
+                            "TEXT".to_owned()
+                        } else {
+                            language.to_uppercase()
+                        };
+                        rows.push(padded_article_row(format!("╭─ {language}"), 24));
+                    }
+                }
+                continue;
+            }
+            if active_block.is_some_and(|(_, _, animated)| !animated) {
+                rows.push(format!("│ {raw}│"));
+            } else if active_block.is_some() {
+                continue;
+            } else if let Some(source) = markdown_image_source(raw) {
+                let (image_rows, image_width) = article
+                    .images
+                    .iter()
+                    .find(|image| image.source == source)
+                    .map_or((1, 1), |image| {
+                        (image.height.div_ceil(2).max(1), image.width.max(1))
+                    });
+                rows.extend(std::iter::repeat_n(
+                    " ".repeat(usize::from(image_width)),
+                    usize::from(image_rows),
+                ));
+            } else {
+                rows.push(markdown_display_text(raw));
+            }
+        }
+        if let Some((index, start_row, animated)) = active_block
+            && let Some(block) = raw_blocks.get(index)
+        {
+            if !animated {
+                rows.push(format!("╰{}╯", "─".repeat(22)));
+            }
+            code_blocks.push(ArticleCodeBlock {
+                index: block.index,
+                language: block.language.clone(),
+                code: block.code.clone(),
+                start_row,
+                end_row: rows.len().saturating_sub(1) as u16,
+            });
+        }
+
+        rows.push(String::new());
+        rows.push(" ".repeat(48));
+        let total_rows = rows.len().min(usize::from(u16::MAX)) as u16;
+        rows.truncate(usize::from(total_rows));
+        let row_widths = rows
+            .iter()
+            .map(|row| text_width(row).max(1))
+            .collect::<Vec<_>>();
+        Some(ArticleNavigation {
+            total_rows: total_rows.max(cursor_start + 1),
+            cursor_start,
+            code_blocks,
+            row_widths,
+            rows,
+        })
+    }
+}
+
+fn normalize_article_vim_character(character: char) -> char {
+    match character {
+        'р' => 'h',
+        'о' => 'j',
+        'л' => 'k',
+        'д' => 'l',
+        'ц' => 'w',
+        'и' => 'b',
+        'у' => 'e',
+        'Ц' => 'W',
+        'И' => 'B',
+        'У' => 'E',
+        'м' => 'v',
+        'п' => 'g',
+        'П' => 'G',
+        other => other,
+    }
+}
+
+fn article_vim_document(layout: &ArticleNavigation) -> String {
+    layout.rows[usize::from(layout.cursor_start)..].join("\n")
+}
+
+fn article_vim_offset(layout: &ArticleNavigation, row: u16, column: u16) -> usize {
+    let start = usize::from(layout.cursor_start);
+    let target = usize::from(row).clamp(start, layout.rows.len().saturating_sub(1));
+    let prefix = layout.rows[start..target]
+        .iter()
+        .map(|line| line.len().saturating_add(1))
+        .sum::<usize>();
+    let line = &layout.rows[target];
+    let column = usize::from(column).min(line.chars().count().saturating_sub(1));
+    let byte = line
+        .char_indices()
+        .nth(column)
+        .map_or(line.len(), |(byte, _)| byte);
+    prefix.saturating_add(byte)
+}
+
+fn article_vim_position(layout: &ArticleNavigation, offset: usize) -> (u16, u16) {
+    let start = usize::from(layout.cursor_start);
+    let mut remaining = offset;
+    for (index, line) in layout.rows[start..].iter().enumerate() {
+        if remaining <= line.len() {
+            let boundary = remaining.min(line.len());
+            let boundary = (0..=boundary)
+                .rev()
+                .find(|position| line.is_char_boundary(*position))
+                .unwrap_or_default();
+            let column = line[..boundary]
+                .chars()
+                .count()
+                .min(line.chars().count().saturating_sub(1));
+            return (
+                (start + index).min(usize::from(u16::MAX)) as u16,
+                column.min(usize::from(u16::MAX)) as u16,
+            );
+        }
+        remaining = remaining.saturating_sub(line.len().saturating_add(1));
+    }
+    let row = layout.total_rows.saturating_sub(1).max(layout.cursor_start);
+    (row, layout.row_widths[usize::from(row)].saturating_sub(1))
+}
+
+fn padded_article_row(mut row: String, width: usize) -> String {
+    let length = row.chars().count();
+    if length < width {
+        row.push_str(&" ".repeat(width - length));
+    } else if length > width {
+        row = row.chars().take(width).collect();
+    }
+    row
+}
+
+#[must_use]
+pub fn markdown_code_blocks(markdown: &str) -> Vec<MarkdownCodeBlock> {
+    let mut blocks = Vec::new();
+    let mut current = None::<(String, String)>;
+    for line in markdown.lines() {
+        if let Some((language, code)) = &mut current {
+            if fence_language(line).is_some() {
+                blocks.push(MarkdownCodeBlock {
+                    index: blocks.len(),
+                    language: std::mem::take(language),
+                    code: std::mem::take(code),
+                });
+                current = None;
+            } else {
+                if !code.is_empty() {
+                    code.push('\n');
+                }
+                code.push_str(line);
+            }
+        } else if let Some(language) = fence_language(line) {
+            current = Some((language, String::new()));
+        }
+    }
+    if let Some((language, code)) = current {
+        blocks.push(MarkdownCodeBlock {
+            index: blocks.len(),
+            language,
+            code,
+        });
+    }
+    blocks
+}
+
+#[must_use]
+pub fn python_code_blocks(markdown: &str) -> Vec<String> {
+    markdown_code_blocks(markdown)
+        .into_iter()
+        .filter(MarkdownCodeBlock::executable)
+        .map(|block| block.code)
+        .collect()
+}
+
+fn fence_language(line: &str) -> Option<String> {
+    let fence = line.trim().strip_prefix("```")?;
+    Some(
+        fence
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_lowercase(),
+    )
+}
+
+fn markdown_image_source(line: &str) -> Option<&str> {
+    let rest = line.trim().strip_prefix("![")?;
+    let (_, rest) = rest.split_once("](")?;
+    rest.strip_suffix(')').map(str::trim)
+}
+
+fn text_width(text: &str) -> u16 {
+    text.chars().count().min(usize::from(u16::MAX)) as u16
+}
+
+fn markdown_display_text(raw: &str) -> String {
+    if let Some(text) = raw
+        .strip_prefix("### ")
+        .or_else(|| raw.strip_prefix("## "))
+        .or_else(|| raw.strip_prefix("# "))
+    {
+        text.to_owned()
+    } else if let Some(text) = raw.strip_prefix("- ") {
+        format!("• {text}")
+    } else if let Some(text) = raw.strip_prefix("> ") {
+        format!("│ {text}")
+    } else {
+        raw.to_owned()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{App, ArticleContent, ArticleSummary, Effect, HelpTarget, Language, Message, Tab};
+    use super::{
+        App, ArticleContent, ArticleSummary, ArticleVimKey, DOT_WELL_ROWS, Effect, HelpTarget,
+        Language, Message, Tab, markdown_code_blocks, python_code_blocks,
+    };
 
     #[test]
     fn tab_navigation_wraps_in_both_directions() {
@@ -508,6 +1414,7 @@ mod tests {
                 published: true,
                 source_path: Some("articles/one.md".into()),
                 edit_url: Some("https://example.com/one".into()),
+                labels: vec!["cryptography".into()],
             },
             ArticleSummary {
                 slug: "two".into(),
@@ -516,6 +1423,7 @@ mod tests {
                 published: true,
                 source_path: Some("articles/two.md".into()),
                 edit_url: Some("https://example.com/two".into()),
+                labels: Vec::new(),
             },
         ]);
         let _ = app.update(Message::NextArticle);
@@ -529,12 +1437,226 @@ mod tests {
             title: "Two".into(),
             markdown: "# Two".into(),
             images: Vec::new(),
+            labels: vec!["Python".into()],
         });
         assert!(app.opened_article().is_some());
+        assert_eq!(app.selected_article().unwrap().labels, ["Python"]);
+        app.set_article_viewport_rows(3);
         let _ = app.update(Message::ScrollArticleDown);
         assert_eq!(app.article_scroll(), 1);
         let _ = app.update(Message::CloseArticle);
         assert!(app.opened_article().is_none());
         assert_eq!(app.article_scroll(), 0);
+    }
+
+    #[test]
+    fn python_fences_are_extracted_without_other_languages() {
+        assert_eq!(
+            python_code_blocks("```rust\nfn main() {}\n```\n```python\nprint(42)\n```"),
+            vec!["print(42)"]
+        );
+    }
+
+    #[test]
+    fn markdown_blocks_keep_stable_indices_and_normalized_languages() {
+        let blocks = markdown_code_blocks(
+            "```rust\nfn main() {}\n```\n```PYTHON extra\nprint(42)\n```\n```\nplain",
+        );
+        assert_eq!(blocks.len(), 3);
+        assert_eq!((blocks[0].index, blocks[0].language.as_str()), (0, "rust"));
+        assert_eq!(
+            (blocks[1].index, blocks[1].language.as_str()),
+            (1, "python")
+        );
+        assert_eq!(blocks[1].code, "print(42)");
+        assert_eq!((blocks[2].index, blocks[2].language.as_str()), (2, ""));
+        assert_eq!(blocks[2].code, "plain");
+    }
+
+    #[test]
+    fn article_cursor_focuses_one_block_and_stops_at_document_end() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "blocks".into(),
+            title: "Blocks".into(),
+            markdown: concat!(
+                "Intro\n",
+                "```rust\nlet value = 1;\n```\n",
+                "Between\n",
+                "```Python\nprint(42)\nprint(43)\n```\n",
+                "End"
+            )
+            .into(),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        app.set_article_viewport_rows(4);
+
+        let rust = app.article_code_block(0).unwrap();
+        let python = app.article_code_block(1).unwrap();
+        assert!(!rust.executable());
+        assert!(python.executable());
+
+        let _ = app.update(Message::SelectArticleCursor(rust.start_row));
+        assert_eq!(app.focused_code_block().unwrap().index, 0);
+        assert_eq!(app.python_code(), None);
+
+        let _ = app.update(Message::SelectArticleCursor(python.end_row));
+        assert_eq!(app.focused_code_block().unwrap().index, 1);
+        assert_eq!(app.python_code().as_deref(), Some("print(42)\nprint(43)"));
+
+        for _ in 0..100 {
+            let _ = app.update(Message::ScrollArticleDown);
+        }
+        assert_eq!(app.article_cursor(), app.article_total_rows() - 1);
+        assert_eq!(app.article_scroll(), app.article_scroll_limit());
+    }
+
+    #[test]
+    fn dot_well_has_fixed_navigation_rows_and_an_advancing_phase() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "animation".into(),
+            title: "Animation".into(),
+            markdown: "Before\n```DOT-WELL\n```\nAfter".into(),
+            images: Vec::new(),
+            labels: vec!["animation".into()],
+        });
+
+        assert!(app.article_has_animation());
+        let block = app.article_code_block(0).unwrap();
+        assert!(block.animated());
+        assert_eq!(block.end_row - block.start_row + 1, DOT_WELL_ROWS);
+        let _ = app.update(Message::AdvanceArticleAnimation);
+        assert_eq!(app.article_animation_phase(), 1);
+        let _ = app.update(Message::CloseArticle);
+        assert_eq!(app.article_animation_phase(), 0);
+    }
+
+    #[test]
+    fn read_only_vim_cursor_moves_by_character_and_keeps_its_column() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "vim".into(),
+            title: "Vim".into(),
+            markdown: "abcdefgh\nx\nabcdefgh".into(),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        app.set_article_viewport_rows(4);
+
+        let _ = app.update(Message::SelectArticlePosition { row: 4, column: 6 });
+        assert_eq!((app.article_cursor(), app.article_cursor_column()), (4, 6));
+        let _ = app.update(Message::ScrollArticleDown);
+        assert_eq!((app.article_cursor(), app.article_cursor_column()), (5, 0));
+        let _ = app.update(Message::ScrollArticleDown);
+        assert_eq!((app.article_cursor(), app.article_cursor_column()), (6, 6));
+
+        let _ = app.update(Message::MoveArticleCursorLeft);
+        assert_eq!(app.article_cursor_column(), 5);
+        let _ = app.update(Message::MoveArticleCursorToLineStart);
+        assert_eq!(app.article_cursor_column(), 0);
+        let _ = app.update(Message::MoveArticleCursorToLineEnd);
+        assert_eq!(app.article_cursor_column(), 7);
+        let _ = app.update(Message::MoveArticleCursorRight);
+        assert_eq!(app.article_cursor_column(), 7);
+    }
+
+    #[test]
+    fn article_opens_in_view_and_i_enters_read_only_vim() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "vim".into(),
+            title: "Vim".into(),
+            markdown: "first\nsecond\nthird".into(),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        app.set_article_viewport_rows(2);
+
+        assert!(!app.article_vim_mode());
+        let _ = app.update(Message::EnterArticleVim);
+        assert!(app.article_vim_mode());
+        let _ = app.update(Message::MoveArticleCursorToDocumentEnd);
+        assert_eq!(app.article_cursor(), app.article_total_rows() - 1);
+        let _ = app.update(Message::BeginArticleG);
+        assert!(app.awaiting_article_g());
+        let _ = app.update(Message::CompleteArticleG);
+        assert_eq!(app.article_cursor(), 2);
+        let _ = app.update(Message::ExitArticleVim);
+        assert!(!app.article_vim_mode());
+        assert!(app.opened_article().is_some());
+    }
+
+    #[test]
+    fn vim_engine_handles_words_counts_visual_mode_and_russian_layout() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "vim-engine".into(),
+            title: "Vim engine".into(),
+            markdown: "alpha beta\nshort\nthird line\nfourth".into(),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        app.set_article_viewport_rows(3);
+        let _ = app.update(Message::SelectArticlePosition { row: 4, column: 0 });
+        let _ = app.update(Message::EnterArticleVim);
+
+        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('w')));
+        assert_eq!((app.article_cursor(), app.article_cursor_column()), (4, 6));
+        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('2')));
+        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('j')));
+        assert_eq!((app.article_cursor(), app.article_cursor_column()), (6, 6));
+        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('и')));
+        assert_eq!((app.article_cursor(), app.article_cursor_column()), (6, 0));
+
+        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('м')));
+        assert_eq!(app.article_vim_status(), "VISUAL RO");
+        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Char('w')));
+        assert_eq!(app.article_vim_selection().len(), 1);
+        assert_eq!(
+            (
+                app.article_vim_selection()[0].row,
+                app.article_vim_selection()[0].start_column,
+                app.article_vim_selection()[0].end_column,
+            ),
+            (6, 0, 7)
+        );
+        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Escape));
+        assert!(app.article_vim_mode());
+        assert_eq!(app.article_vim_status(), "NORMAL RO");
+        let _ = app.update(Message::ArticleVimInput(ArticleVimKey::Escape));
+        assert!(!app.article_vim_mode());
+    }
+
+    #[test]
+    fn article_loading_advances_the_shared_animation() {
+        let mut app = App::default();
+        app.begin_article_load();
+        assert!(app.article_animation_active());
+        let _ = app.update(Message::AdvanceArticleAnimation);
+        assert_eq!(app.article_animation_phase(), 1);
+    }
+
+    #[test]
+    fn python_output_is_dismissed_without_closing_the_article() {
+        let mut app = App::default();
+        app.set_opened_article(ArticleContent {
+            slug: "python".into(),
+            title: "Python".into(),
+            markdown: "```python\nprint(42)\n```".into(),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        app.finish_python_run("42");
+        let _ = app.update(Message::DismissPythonOutput);
+        assert_eq!(app.python_output(), None);
+        assert!(!app.python_running());
+        assert!(app.opened_article().is_some());
     }
 }

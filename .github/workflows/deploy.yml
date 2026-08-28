@@ -1,0 +1,91 @@
+name: Deploy production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install build dependencies
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm ci
+          cargo install --locked trunk
+      - name: Verify and build release
+        run: |
+          cargo test --workspace --locked
+          cargo build --release -p svetsec-server --locked
+          trunk build --release
+      - name: Package release
+        run: >-
+          tar -czf svetsec-release.tar.gz
+          target/release/svetsec-server dist package.json package-lock.json scripts
+      - uses: actions/upload-artifact@v7
+        with:
+          name: svetsec-release
+          path: svetsec-release.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://svetsec.ru
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      DEPLOY_SERVICE: ${{ vars.DEPLOY_SERVICE }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: svetsec-release
+      - name: Validate deployment settings
+        shell: bash
+        run: |
+          [[ "$DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]
+          [[ "$DEPLOY_USER" =~ ^[A-Za-z0-9._-]+$ ]]
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]]
+          [[ "$DEPLOY_SERVICE" =~ ^[A-Za-z0-9_.@-]+$ ]]
+      - name: Configure SSH
+        shell: bash
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/deploy_key" "$HOME/.ssh/known_hosts"
+      - name: Upload release
+        run: |
+          scp -i "$HOME/.ssh/deploy_key" -P "$DEPLOY_PORT" \
+            svetsec-release.tar.gz scripts/deploy-release.sh \
+            "$DEPLOY_USER@$DEPLOY_HOST:/tmp/"
+      - name: Activate release
+        shell: bash
+        run: |
+          ssh -i "$HOME/.ssh/deploy_key" -p "$DEPLOY_PORT" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash /tmp/deploy-release.sh '$DEPLOY_PATH' '$DEPLOY_SERVICE' '${{ github.sha }}'"

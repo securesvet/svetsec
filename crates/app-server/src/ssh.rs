@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
@@ -21,12 +22,14 @@ use russh::{
     server::{Auth, ChannelOpenHandle, Config, Handle, Handler, Msg, Server, Session},
 };
 use svetsec_core::{
-    App, ArticleContent, ArticleImage, ArticleSummary, HelpTarget, Language, Message, Tab,
+    App, ArticleContent, ArticleImage, ArticleSummary, ArticleVimKey, HelpTarget, Language,
+    Message, Tab,
 };
 use tokio::sync::{Mutex, mpsc::UnboundedSender, mpsc::unbounded_channel};
 
 use crate::db::{ArticleInput, Database};
 use crate::github::GithubSource;
+use crate::python::PyodideRunner;
 
 type SshTerminal = Terminal<CrosstermBackend<TerminalHandle>>;
 
@@ -79,6 +82,8 @@ struct SshServer {
     owner_user: Arc<str>,
     owner_key: Arc<PublicKey>,
     github: GithubSource,
+    profile_image: Arc<ArticleImage>,
+    pyodide: PyodideRunner,
     id: usize,
     authenticated_owner: bool,
 }
@@ -90,13 +95,29 @@ pub async fn serve(
     owner_key: PublicKey,
     host_key: PrivateKey,
     github: GithubSource,
+    pyodide: PyodideRunner,
 ) -> Result<()> {
+    let profile = crate::github::rasterize_image_with_bounds(
+        "/assets/profile.jpg",
+        "Sviatoslav M.",
+        include_bytes!("../../app-web/assets/profile.jpg"),
+        18,
+        18,
+    )?;
     let mut server = SshServer {
         clients: Arc::new(Mutex::new(HashMap::new())),
         database,
         owner_user: owner_user.into(),
         owner_key: Arc::new(owner_key),
         github,
+        profile_image: Arc::new(ArticleImage {
+            source: profile.source,
+            alt: profile.alt,
+            width: profile.width,
+            height: profile.height,
+            pixels: profile.pixels,
+        }),
+        pyodide,
         id: 0,
         authenticated_owner: false,
     };
@@ -121,8 +142,10 @@ impl SshServer {
         tokio::spawn(async move {
             let mut online = false;
             let mut next_refresh = tokio::time::Instant::now();
+            let mut advance_skeleton = false;
             loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                advance_skeleton = !advance_skeleton;
                 let refresh = tokio::time::Instant::now() >= next_refresh;
                 if refresh {
                     online = database.owner_online().unwrap_or(false);
@@ -136,8 +159,13 @@ impl SshServer {
                     let _ = client
                         .app
                         .update(Message::SetOwnerOnline(online || client.owner));
-                    if client.app.articles_loading() || client.app.article_loading() {
+                    if advance_skeleton
+                        && (client.app.articles_loading() || client.app.article_loading())
+                    {
                         let _ = client.app.update(Message::AdvanceSkeleton);
+                    }
+                    if client.app.article_animation_active() {
+                        let _ = client.app.update(Message::AdvanceArticleAnimation);
                     }
                     let Client {
                         terminal,
@@ -149,6 +177,9 @@ impl SshServer {
                         if let Some(editor) = editor {
                             render_editor(frame, editor);
                         } else {
+                            app.set_article_viewport_rows(svetsec_ui::article_viewport_rows(
+                                frame.area(),
+                            ));
                             svetsec_ui::render(frame, app);
                         }
                     });
@@ -220,6 +251,7 @@ impl Handler for SshServer {
             },
         )?;
         let mut app = App::default();
+        app.set_profile_image((*self.profile_image).clone());
         let _ = app.update(Message::SetAuthenticated(self.authenticated_owner));
         let _ = app.update(Message::SetOwnerOnline(
             self.database.owner_online()? || self.authenticated_owner,
@@ -265,7 +297,10 @@ impl Handler for SshServer {
             return Ok(());
         }
 
-        if data == b"q" || data == "й".as_bytes() || data == b"\x03" {
+        let article_vim_mode = client.app.selected() == Tab::Articles
+            && client.app.opened_article().is_some()
+            && client.app.article_vim_mode();
+        if (!article_vim_mode && (data == b"q" || data == "й".as_bytes())) || data == b"\x03" {
             clients.remove(&self.id);
             self.database.remove_presence(&self.presence_id())?;
             session.close(channel)?;
@@ -274,10 +309,51 @@ impl Handler for SshServer {
 
         let mut load_list = false;
         let mut load_body = None;
+        let mut python_code = None;
         if client.app.selected() == Tab::Articles {
+            let article_open = client.app.opened_article().is_some();
+            let vim_mode = client.app.article_vim_mode();
             if data == b"f" || data == "а".as_bytes() {
                 client.app.begin_articles_load();
                 load_list = true;
+            }
+            if article_open
+                && (data == b"x" || data == "ч".as_bytes())
+                && client.app.python_output().is_some()
+            {
+                let _ = client.app.update(Message::DismissPythonOutput);
+                return Ok(());
+            }
+            if article_open && !vim_mode && (data == b"i" || data == "ш".as_bytes()) {
+                let _ = client.app.update(Message::EnterArticleVim);
+                return Ok(());
+            }
+            if article_open
+                && (data == b"c" || data == "с".as_bytes())
+                && let Some(block) = client.app.focused_code_block()
+                && !block.animated()
+                && !block.code.is_empty()
+            {
+                let clipboard = format!("\x1b]52;c;{}\x07", STANDARD.encode(block.code));
+                session.data(channel, clipboard.into_bytes())?;
+                return Ok(());
+            }
+            let run_key = article_open && (data == b"p" || data == "з".as_bytes());
+            if run_key && !client.app.python_running() {
+                python_code = client.app.python_code();
+                if python_code.is_some() {
+                    client.app.begin_python_run();
+                }
+            }
+            if article_open
+                && vim_mode
+                && !run_key
+                && let Some(keys) = ssh_article_vim_keys(data)
+            {
+                for key in keys {
+                    let _ = client.app.update(Message::ArticleVimInput(key));
+                }
+                return Ok(());
             }
             if data == b"\x1b[A" || data == b"k" || data == "л".as_bytes() {
                 let message = if client.app.opened_article().is_some() {
@@ -309,7 +385,7 @@ impl Handler for SshServer {
                     client.app.begin_article_load();
                 }
             }
-            if data == b"\x1b" && client.app.opened_article().is_some() {
+            if data == b"\x1b" && article_open {
                 let _ = client.app.update(Message::CloseArticle);
                 return Ok(());
             }
@@ -334,6 +410,19 @@ impl Handler for SshServer {
         };
         if let Some(message) = message {
             let _ = client.app.update(message);
+        }
+        if (data == b"r" || data == "к".as_bytes()) && client.app.selected() == Tab::Articles {
+            if let Some(slug) = client
+                .app
+                .opened_article()
+                .map(|article| article.slug.clone())
+            {
+                client.app.begin_article_load();
+                load_body = Some(slug);
+            } else {
+                client.app.begin_articles_load();
+                load_list = true;
+            }
         }
         if client.app.selected() == Tab::Articles
             && !client.app.articles_loaded()
@@ -365,6 +454,9 @@ impl Handler for SshServer {
         }
         if let Some(slug) = load_body {
             self.load_github_article(slug);
+        }
+        if let Some(code) = python_code {
+            self.run_python(code);
         }
         Ok(())
     }
@@ -404,7 +496,12 @@ impl SshServer {
         let clients = Arc::clone(&self.clients);
         let id = self.id;
         tokio::spawn(async move {
-            let result = github.list(refresh).await;
+            let language = clients
+                .lock()
+                .await
+                .get(&id)
+                .map_or(Language::default(), |client| client.app.language());
+            let result = github.list(refresh, language).await;
             if let Some(client) = clients.lock().await.get_mut(&id) {
                 match result {
                     Ok(articles) => client.app.set_articles(
@@ -417,12 +514,11 @@ impl SshServer {
                                 published: article.published,
                                 source_path: Some(article.source_path),
                                 edit_url: Some(article.edit_url),
+                                labels: article.labels,
                             })
                             .collect(),
                     ),
-                    Err(_) => client
-                        .app
-                        .set_articles_error("Could not load articles from GitHub."),
+                    Err(_) => client.app.set_articles_error("Could not load articles."),
                 }
             }
         });
@@ -433,7 +529,12 @@ impl SshServer {
         let clients = Arc::clone(&self.clients);
         let id = self.id;
         tokio::spawn(async move {
-            let result = github.article(&slug).await;
+            let language = clients
+                .lock()
+                .await
+                .get(&id)
+                .map_or(Language::default(), |client| client.app.language());
+            let result = github.article(&slug, language).await;
             if let Some(client) = clients.lock().await.get_mut(&id) {
                 match result {
                     Ok(article) => client.app.set_opened_article(ArticleContent {
@@ -451,11 +552,28 @@ impl SshServer {
                                 pixels: image.pixels,
                             })
                             .collect(),
+                        labels: article.labels,
                     }),
                     Err(_) => client
                         .app
                         .set_articles_error("Could not load this Markdown file."),
                 }
+            }
+        });
+    }
+
+    fn run_python(&self, code: String) {
+        let pyodide = self.pyodide.clone();
+        let clients = Arc::clone(&self.clients);
+        let id = self.id;
+        tokio::spawn(async move {
+            let result = pyodide.run(&code).await;
+            if let Some(client) = clients.lock().await.get_mut(&id) {
+                client.app.finish_python_run(match result {
+                    Ok(output) if output.trim().is_empty() => "(no output)".into(),
+                    Ok(output) => output,
+                    Err(error) => format!("Python unavailable: {error}"),
+                });
             }
         });
     }
@@ -503,6 +621,7 @@ struct VimEditor {
     command: String,
     slug: String,
     titles: [String; 2],
+    labels: Vec<String>,
     published: bool,
     dirty: bool,
     status: String,
@@ -523,6 +642,7 @@ impl VimEditor {
             command: String::new(),
             slug: format!("draft-{timestamp}"),
             titles: ["Untitled".into(), "Без названия".into()],
+            labels: Vec::new(),
             published: false,
             dirty: false,
             status: "NORMAL  i insert · :w save · :help commands".into(),
@@ -648,7 +768,15 @@ impl VimEditor {
             }
             "lang en" => self.switch_language(Language::En),
             "lang ru" => self.switch_language(Language::Ru),
-            "help" => self.status = ":title TEXT · :slug SLUG · :lang en|ru · :export · :wq".into(),
+            "labels" => {
+                self.labels.clear();
+                self.dirty = true;
+                self.status = "Labels cleared".into();
+            }
+            "help" => {
+                self.status =
+                    ":title TEXT · :slug SLUG · :labels A,B · :lang en|ru · :export · :wq".into();
+            }
             _ if command.starts_with("title ") => {
                 let index = self.language_index();
                 self.titles[index] = command[6..].trim().to_owned();
@@ -660,6 +788,14 @@ impl VimEditor {
                 self.dirty = true;
                 self.status = "Slug updated".into();
             }
+            _ if command.starts_with("labels ") => match editor_labels(command[7..].trim()) {
+                Ok(labels) => {
+                    self.labels = labels;
+                    self.dirty = true;
+                    self.status = format!("Labels: {}", self.labels.join(", "));
+                }
+                Err(error) => self.status = error.to_string(),
+            },
             _ => self.status = format!("Not an editor command: {command}"),
         }
         Ok(EditorOutcome::Continue)
@@ -688,10 +824,22 @@ impl VimEditor {
             anyhow::bail!("slug must contain only ASCII letters, numbers, - or _");
         }
         let directory = std::env::var("SVETSEC_ARTICLES_DIR").unwrap_or_else(|_| "articles".into());
+        let directory = std::path::Path::new(&directory).join(&self.slug);
         std::fs::create_dir_all(&directory)?;
-        let path = std::path::Path::new(&directory).join(format!("{}.md", self.slug));
+        let path = directory.join(format!("{}.md", self.language.path_code()));
+        let frontmatter = if self.labels.is_empty() {
+            String::new()
+        } else {
+            let labels = self
+                .labels
+                .iter()
+                .map(|label| serde_json::to_string(label).map(|label| format!("  - {label}")))
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            format!("---\nlabels:\n{labels}\n---\n\n")
+        };
         let markdown = format!(
-            "# {}\n\n{}\n",
+            "{frontmatter}# {}\n\n{}\n",
             self.titles[self.language_index()],
             self.lines().join("\n")
         );
@@ -777,6 +925,51 @@ fn valid_article_slug(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn editor_labels(value: &str) -> Result<Vec<String>> {
+    let mut labels = Vec::new();
+    for label in value
+        .split(',')
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+    {
+        if label.chars().count() > 24 || label.chars().any(char::is_control) {
+            anyhow::bail!("Each label must contain at most 24 printable characters");
+        }
+        if !labels
+            .iter()
+            .any(|existing: &String| existing.to_lowercase() == label.to_lowercase())
+        {
+            labels.push(label.to_owned());
+        }
+        if labels.len() > 6 {
+            anyhow::bail!("An article can have at most 6 labels");
+        }
+    }
+    if labels.is_empty() {
+        anyhow::bail!("Use :labels A,B or :labels to clear labels");
+    }
+    Ok(labels)
+}
+
+fn ssh_article_vim_keys(data: &[u8]) -> Option<Vec<ArticleVimKey>> {
+    let special = match data {
+        b"\x1b[A" => Some(ArticleVimKey::Up),
+        b"\x1b[B" => Some(ArticleVimKey::Down),
+        b"\x1b[D" => Some(ArticleVimKey::Left),
+        b"\x1b[C" => Some(ArticleVimKey::Right),
+        b"\x1b[H" | b"\x1b[1~" => Some(ArticleVimKey::Home),
+        b"\x1b[F" | b"\x1b[4~" => Some(ArticleVimKey::End),
+        b"\x1b" => Some(ArticleVimKey::Escape),
+        _ => None,
+    };
+    if let Some(key) = special {
+        return Some(vec![key]);
+    }
+    let text = std::str::from_utf8(data).ok()?;
+    let keys = text.chars().map(ArticleVimKey::Char).collect::<Vec<_>>();
+    (!keys.is_empty()).then_some(keys)
 }
 
 fn command_key(character: char) -> char {
@@ -881,7 +1074,7 @@ fn render_editor(frame: &mut ratatui::Frame<'_>, editor: &VimEditor) {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorMode, EditorOutcome, VimEditor};
+    use super::{EditorMode, EditorOutcome, VimEditor, editor_labels};
     use crate::db::Database;
     use svetsec_core::Language;
 
@@ -905,5 +1098,18 @@ mod tests {
             editor.input(b":q\r", &database).expect("quit"),
             EditorOutcome::Close
         );
+    }
+
+    #[test]
+    fn editor_labels_are_case_insensitive_and_bounded() {
+        assert_eq!(
+            editor_labels("Cryptography, python, CRYPTOGRAPHY").expect("labels"),
+            ["Cryptography", "python"]
+        );
+        assert_eq!(
+            editor_labels("Криптография, КРИПТОГРАФИЯ").expect("Unicode labels"),
+            ["Криптография"]
+        );
+        assert!(editor_labels("one,two,three,four,five,six,seven").is_err());
     }
 }

@@ -20,13 +20,25 @@ svetsec-ui = { path = "../app-ui" }
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 web-sys = { workspace = true, features = [
+    "Clipboard",
     "Document",
     "DomRect",
     "Element",
+    "Event",
+    "EventTarget",
     "Headers",
+    "History",
+    "KeyboardEvent",
+    "Location",
+    "MouseEvent",
+    "Navigator",
+    "Node",
+    "NodeList",
     "Request",
     "RequestCredentials",
     "RequestInit",
     "Response",
+    "Storage",
+    "WheelEvent",
     "Window",
 ] }

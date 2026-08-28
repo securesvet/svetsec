@@ -9,11 +9,16 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tower_http::{services::ServeDir, trace::TraceLayer};
+use tower_http::{
+    services::{ServeDir, ServeFile},
+    trace::TraceLayer,
+};
 use uuid::Uuid;
 
 use crate::db::{Article, ArticleInput, Database};
 use crate::github::{GithubArticle, GithubArticleBody, GithubSource};
+use crate::python::PyodideRunner;
+use svetsec_core::{Language, markdown_code_blocks};
 
 const COOKIE_NAME: &str = "svetsec_session";
 
@@ -23,6 +28,7 @@ pub struct HttpState {
     password_hash: Arc<str>,
     secure_cookie: bool,
     github: GithubSource,
+    pyodide: PyodideRunner,
 }
 
 #[derive(Serialize)]
@@ -43,9 +49,38 @@ struct GithubArticleList {
     create_url: String,
 }
 
+#[derive(Serialize)]
+struct PythonOutput {
+    output: String,
+}
+
 #[derive(Default, Deserialize)]
 struct GithubListQuery {
     refresh: Option<u8>,
+    lang: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct LanguageQuery {
+    lang: Option<String>,
+}
+
+impl LanguageQuery {
+    fn language(&self) -> Language {
+        self.lang
+            .as_deref()
+            .and_then(Language::from_code)
+            .unwrap_or_default()
+    }
+}
+
+impl GithubListQuery {
+    fn language(&self) -> Language {
+        self.lang
+            .as_deref()
+            .and_then(Language::from_code)
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug)]
@@ -57,12 +92,14 @@ impl HttpState {
         password_hash: String,
         secure_cookie: bool,
         github: GithubSource,
+        pyodide: PyodideRunner,
     ) -> Self {
         Self {
             db,
             password_hash: password_hash.into(),
             secure_cookie,
             github,
+            pyodide,
         }
     }
 }
@@ -72,14 +109,22 @@ pub async fn serve(
     state: HttpState,
     static_dir: String,
 ) -> std::io::Result<()> {
+    let index = std::path::Path::new(&static_dir).join("index.html");
+    let static_files = ServeDir::new(static_dir)
+        .append_index_html_on_directories(true)
+        .fallback(ServeFile::new(index));
     let app = Router::new()
         .route("/api/session", get(session).post(login).delete(logout))
         .route("/api/heartbeat", post(heartbeat))
         .route("/api/articles", get(articles).post(save_article))
         .route("/api/github/articles", get(github_articles))
         .route("/api/github/articles/{slug}", get(github_article))
+        .route(
+            "/api/github/articles/{slug}/python/{block}",
+            post(run_github_python),
+        )
         .route("/api/github/assets/{*path}", get(github_asset))
-        .fallback_service(ServeDir::new(static_dir).append_index_html_on_directories(true))
+        .fallback_service(static_files)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -180,7 +225,7 @@ async fn github_articles(
 ) -> Result<Json<GithubArticleList>, ApiError> {
     let articles = state
         .github
-        .list(query.refresh == Some(1))
+        .list(query.refresh == Some(1), query.language())
         .await
         .map_err(github_error)?;
     Ok(Json(GithubArticleList {
@@ -192,13 +237,38 @@ async fn github_articles(
 async fn github_article(
     State(state): State<HttpState>,
     Path(slug): Path<String>,
+    Query(query): Query<LanguageQuery>,
 ) -> Result<Json<GithubArticleBody>, ApiError> {
     state
         .github
-        .article(&slug)
+        .article(&slug, query.language())
         .await
         .map(Json)
         .map_err(github_error)
+}
+
+async fn run_github_python(
+    State(state): State<HttpState>,
+    Path((slug, block_index)): Path<(String, usize)>,
+    Query(query): Query<LanguageQuery>,
+) -> Result<Json<PythonOutput>, ApiError> {
+    let article = state
+        .github
+        .article(&slug, query.language())
+        .await
+        .map_err(github_error)?;
+    let block = markdown_code_blocks(&article.markdown)
+        .into_iter()
+        .find(|block| block.index == block_index)
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "code block not found"))?;
+    if !block.executable() || block.code.trim().is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "code block is not executable Python",
+        ));
+    }
+    let output = state.pyodide.run(&block.code).await.map_err(python_error)?;
+    Ok(Json(PythonOutput { output }))
 }
 
 async fn github_asset(
@@ -206,16 +276,18 @@ async fn github_asset(
     Path(path): Path<String>,
 ) -> Result<Response, ApiError> {
     let asset = state.github.asset(&path).await.map_err(github_error)?;
+    let cache_control = if state.github.is_local() {
+        HeaderValue::from_static("no-store")
+    } else {
+        HeaderValue::from_static("public, max-age=300")
+    };
     Ok((
         [
             (
                 header::CONTENT_TYPE,
                 HeaderValue::from_static(asset.content_type),
             ),
-            (
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=300"),
-            ),
+            (header::CACHE_CONTROL, cache_control),
         ],
         asset.bytes,
     )
@@ -299,10 +371,18 @@ fn internal(error: rusqlite::Error) -> ApiError {
 }
 
 fn github_error(error: anyhow::Error) -> ApiError {
-    tracing::warn!(%error, "GitHub article request failed");
+    tracing::warn!(%error, "article source request failed");
     ApiError(
         StatusCode::BAD_GATEWAY,
-        "GitHub articles are temporarily unavailable",
+        "articles are temporarily unavailable",
+    )
+}
+
+fn python_error(error: anyhow::Error) -> ApiError {
+    tracing::warn!(%error, "Pyodide execution failed");
+    ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Python execution is temporarily unavailable",
     )
 }
 

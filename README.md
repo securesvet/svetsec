@@ -20,19 +20,33 @@ adds SQLite-backed owner sessions, live owner presence, and articles.
 - The owner can open Articles and press `e` over SSH to enter the Vim-like
   editor. Article writes are enforced server-side.
 - Published Markdown is discovered from `main/articles` through the server.
-  The filename list loads first; a file body is fetched only when opened.
+  The directory list loads first; a language file body is fetched only when
+  opened. While it loads, the shared dot-well animation shows three large
+  moving wells.
+- Browser history uses `/`, `/articles`, `/articles/<slug>`, and `/info`, so a
+  refresh or Back/Forward navigation preserves the current screen.
+- Every browser click target has pointer and hover feedback: menu tabs, article
+  rows, code actions, and the Python output close button.
 - Markdown images keep their original quality in the browser and use compact
   true-color previews over SSH.
+- Article frontmatter provides colored labels. Python fences from the selected
+  article source can be executed through the same server-side Pyodide runner
+  from the browser or SSH. Output temporarily replaces the right-hand telemetry
+  panel and remains there until `x` (or its close button) is used.
+  Label matching is case-insensitive; unknown labels keep a deterministic
+  palette color.
 
 ## Requirements
 
 - Stable Rust with the `wasm32-unknown-unknown` target
 - [Trunk](https://trunkrs.dev/) for the browser build
 - `ssh-keygen` for the SSH host key
+- Node.js 18+ and `npm install` for server-side Pyodide
 
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo install --locked trunk
+npm install
 ```
 
 ## Build the browser
@@ -52,6 +66,11 @@ Generate a password hash (do not store the clear-text password in an env file):
 ```sh
 cargo run -p svetsec-server -- hash-password 'choose-a-long-password'
 ```
+
+Copy `.env.example` to `.env` and paste the generated value into
+`SVETSEC_OWNER_PASSWORD_HASH`. The server loads `.env` automatically; `.env`
+is ignored by Git. Real environment variables still take precedence in
+production.
 
 Generate a persistent SSH host key once:
 
@@ -85,7 +104,7 @@ can be sent over `http://127.0.0.1`.
 
 ## Use the site
 
-Browser shortcuts:
+Browser shortcuts (article navigation keys are shared with SSH):
 
 - `Left`/`Right`, `h`/`l`, or `1`–`3`: sections
 - `r`: switch language
@@ -95,6 +114,15 @@ Browser shortcuts:
 - `e`: edit the selected article on GitHub; creates one if the list is empty
 - `n`: create a new Markdown article on GitHub
 - `f`: refresh the filename list after a GitHub commit
+- `i`: enter the article's read-only Vim Normal mode
+- `p`: in Vim mode, run the focused committed `python`/`python3`/`py` fence
+  through Pyodide
+- `h`/`j`/`k`/`l` or arrows: move the read-only Vim cursor inside an article
+- `0`/`$` or `Home`/`End`: jump to the start/end of the rendered line
+- `gg`/`G`: jump to the beginning/end of the rendered document
+- `c`: in Vim mode, copy the focused code block (`OSC 52` is used over SSH)
+- `Esc`: leave Vim mode; from View mode, close the article
+- `x`: close the Python output panel
 - Mouse/touch: sections
 - Mouse hover on desktop: contextual single-line hints
 
@@ -116,26 +144,43 @@ In the owner session, open Articles (`2`) and press `e`. Editor commands:
 - `Esc`: return to Normal mode
 - `h`, `j`, `k`, `l`, `x`: Vim-style movement/deletion
 - `:title TEXT`, `:slug SLUG`: edit metadata
+- `:labels cryptography, python`: set frontmatter labels (`:labels` clears them)
 - `:lang en` / `:lang ru`: switch the article language buffer
 - `:publish` / `:draft`: change publication state
-- `:export`: write the current language buffer to `articles/<slug>.md` so it
-  can be committed and pushed to `main`
+- `:export`: write the current language buffer to
+  `articles/<slug>/<en|ru>.md` so it can be committed and pushed to `main`
 - `:w`, `:wq`, `:q!`: save, save-and-close, discard-and-close
 
 Normal-mode and site shortcuts also accept the corresponding Russian-layout
 keys, for example `h/р`, `j/о`, `k/л`, `l/д`, `r/к`, `e/у`, and `q/й`.
+Python execution uses `p/з`.
 
 ## Markdown articles from GitHub
 
-Push public articles to `articles/<slug>.md` on `main`. The list title is
-derived from the filename, while the full file and its `# H1` title are loaded
-only when a visitor opens the article. Files beginning with `_` are ignored;
-see `articles/_FORMAT.md` for the supported skeleton.
+Push public articles to `articles/<slug>/en.md` and/or
+`articles/<slug>/ru.md` on `main`. The list title is derived from the directory,
+while the selected language file and its `# H1` title are loaded only when a
+visitor opens the article. If that language does not exist, the server falls
+back to the available translation. Files beginning with `_` are ignored; see
+`articles/_FORMAT.md` for the supported skeleton.
 
 Public repositories need no GitHub token. If the repository becomes private or
 the anonymous API limit is too small, set `SVETSEC_GITHUB_TOKEN` on the server
 to a fine-grained token with read-only Contents permission. Never expose it to
 the WASM client.
+
+For local development, add this to `.env`:
+
+```sh
+SVETSEC_ARTICLES_SOURCE='local'
+SVETSEC_ARTICLES_DIR='articles'
+```
+
+The browser and SSH server will then read Markdown and images directly from
+the local `articles/` folder. Local files bypass the GitHub/body caches, so
+closing and reopening an article shows the latest saved content. Set
+`SVETSEC_ARTICLES_SOURCE=github` (the default) in production to use the
+configured GitHub repository again.
 
 ## API and data model
 
@@ -146,8 +191,40 @@ The server creates the SQLite schema automatically. It contains
 - `POST /api/heartbeat`: refresh owner presence
 - `GET /api/articles`: published articles for guests, drafts included for owner
 - `POST /api/articles`: create/update by slug; owner session required
-- `GET /api/github/articles`: cached Markdown filename list from GitHub
-- `GET /api/github/articles/:slug`: lazily fetched Markdown body
+- `GET /api/github/articles?lang=en|ru`: Markdown directory list from the
+  configured source
+- `GET /api/github/articles/:slug?lang=en|ru`: lazily loaded localized body
+- `POST /api/github/articles/:slug/python/:block`: run one selected Python
+  fence from that source article through the concurrency-, memory-, time-, and
+  output-limited Pyodide worker; the request itself cannot supply source code
+
+## GitHub Actions CI and deployment
+
+`.github/workflows/ci.yml` checks every pull request and push to `main`.
+`.github/workflows/deploy.yml` repeats the release checks, packages the Rust
+server, browser `dist/`, and Pyodide runtime files, then deploys a versioned
+release over SSH after a push to `main` (or a manual dispatch).
+
+Create a GitHub Environment named `production`, then configure these encrypted
+environment secrets:
+
+- `DEPLOY_HOST`: server hostname or IP
+- `DEPLOY_PORT`: SSH port
+- `DEPLOY_USER`: restricted deployment user
+- `DEPLOY_SSH_KEY`: that user's private deployment key
+- `DEPLOY_KNOWN_HOSTS`: pinned `known_hosts` line for the server
+
+Configure these environment variables (not secrets):
+
+- `DEPLOY_PATH`: absolute release root, for example `/opt/svetsec`
+- `DEPLOY_SERVICE`: systemd unit name, for example `svetsec`
+
+Place the production env file at `$DEPLOY_PATH/shared/.env`; each release links
+to it. Configure the systemd unit with
+`WorkingDirectory=$DEPLOY_PATH/current`. The deployment user must own the
+release root and have narrowly scoped passwordless permission to restart only
+the configured service. Database and SSH host-key paths in `.env` should point
+outside the versioned release directories.
 
 ## Local terminal
 
