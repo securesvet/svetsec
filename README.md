@@ -201,9 +201,12 @@ The server creates the SQLite schema automatically. It contains
 ## GitHub Actions CI and deployment
 
 `.github/workflows/ci.yml` checks every pull request and push to `main`.
-`.github/workflows/deploy.yml` repeats the release checks, packages the Rust
-server, browser `dist/`, and Pyodide runtime files, then deploys a versioned
-release over SSH after a push to `main` (or a manual dispatch).
+`.github/workflows/deploy.yml` repeats the release checks, builds a production
+Docker image containing the Rust server, browser `dist/`, Node.js, and the
+Pyodide runtime, then transfers that image over SSH and activates it with
+Docker Compose after a push to `main` (or a manual dispatch). The workflow
+targets `linux/amd64`; change `DOCKER_PLATFORM` to `linux/arm64` for an ARM
+server.
 
 Create a GitHub Environment named `production`, then configure these encrypted
 environment secrets:
@@ -217,14 +220,27 @@ environment secrets:
 Configure these environment variables (not secrets):
 
 - `DEPLOY_PATH`: absolute release root, for example `/opt/svetsec`
-- `DEPLOY_SERVICE`: systemd unit name, for example `svetsec`
 
-Place the production env file at `$DEPLOY_PATH/shared/.env`; each release links
-to it. Configure the systemd unit with
-`WorkingDirectory=$DEPLOY_PATH/current`. The deployment user must own the
-release root and have narrowly scoped passwordless permission to restart only
-the configured service. Database and SSH host-key paths in `.env` should point
-outside the versioned release directories.
+Install Docker Engine with the Compose v2 plugin on the server and grant the
+restricted deployment user access to that Docker daemon. Prepare the persistent
+files once:
+
+```sh
+sudo mkdir -p /opt/svetsec/shared /opt/svetsec/data
+sudo chown -R deploy:deploy /opt/svetsec
+# /opt/svetsec/shared/.env
+# /opt/svetsec/shared/owner_ed25519.pub
+# /opt/svetsec/shared/ssh_host_ed25519_key
+```
+
+The Compose deployment mounts `shared/` read-only, stores SQLite in
+`$DEPLOY_PATH/data/svetsec.db`, publishes HTTP on host loopback port 3000 for a
+reverse proxy, and publishes SSH on host port 2222. Both host ports can be
+changed in `shared/.env` with `SVETSEC_HTTP_PORT` and `SVETSEC_SSH_PORT`.
+Inside the container the key paths are fixed to
+`/run/svetsec/owner_ed25519.pub` and
+`/run/svetsec/ssh_host_ed25519_key`, so host-specific absolute key paths are no
+longer needed in `.env`.
 
 ## Local terminal
 

@@ -1,0 +1,12 @@
+.git
+.github
+.env
+target
+dist
+crates/app-web/dist
+node_modules
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+/image.png
