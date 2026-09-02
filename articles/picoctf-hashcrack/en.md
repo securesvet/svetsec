@@ -1,4 +1,6 @@
 ---
+title: "PicoCTF: hashcrack"
+date: 2025-04-18
 labels:
   - cryptography
   - ctf

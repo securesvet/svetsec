@@ -1,4 +1,6 @@
 ---
+title: "Эллиптические кривые в криптографии"
+date: 2025-07-23
 labels:
   - cryptography
   - rust

@@ -1566,6 +1566,7 @@ async fn fetch_articles(
             slug: string("slug"),
             title_en: string("title_en"),
             title_ru: string("title_ru"),
+            date: string("date"),
             published: js_sys::Reflect::get(&value, &JsValue::from_str("published"))?
                 .as_bool()
                 .unwrap_or(false),

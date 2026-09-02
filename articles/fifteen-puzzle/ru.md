@@ -1,4 +1,6 @@
 ---
+title: "Пятнашки, теория групп, WebAssembly"
+date: 2025-10-05
 labels:
   - mathematics
   - webassembly

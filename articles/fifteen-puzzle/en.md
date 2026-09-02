@@ -1,4 +1,6 @@
 ---
+title: "Fifteen puzzle, group theory, and WebAssembly"
+date: 2025-10-05
 labels:
   - mathematics
   - webassembly

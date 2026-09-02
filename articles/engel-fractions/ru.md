@@ -1,4 +1,6 @@
 ---
+title: "Дроби Энгеля"
+date: 2025-04-13
 labels:
   - mathematics
   - cryptography

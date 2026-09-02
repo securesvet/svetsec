@@ -1,4 +1,6 @@
 ---
+title: "Elliptic curves in cryptography"
+date: 2025-07-23
 labels:
   - cryptography
   - rust

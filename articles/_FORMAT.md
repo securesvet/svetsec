@@ -13,10 +13,13 @@ Every public article must contain both `en.md` and `ru.md`. The reader asks for
 the visitor's selected language first; the fallback remains in place so an
 article still opens safely while a translation is being prepared.
 
-Optional frontmatter can assign up to six labels:
+Frontmatter is preloaded for the article index. Give both language variants the
+same ISO date and a localized title; labels remain optional (up to six):
 
 ```yaml
 ---
+title: "Memory safety in Rust"
+date: 2026-09-02
 labels:
   - cryptography
   - python
@@ -27,7 +30,10 @@ Label matching is case-insensitive. Known labels use curated colors; every
 other label is mapped deterministically to the same palette color.
 
 - Use a safe ASCII directory slug such as `rust-memory-safety`.
-- The list title is derived from the directory: `rust-memory-safety` becomes
+- Articles are sorted newest-first and separated into date groups. Use
+  `YYYY-MM-DD`; an absent or invalid value is grouped under `Undated`.
+- The list uses the localized frontmatter `title`. If it is missing, the title
+  is derived from the directory: `rust-memory-safety` becomes
   `Rust memory safety`.
 - Start the document with an H1 heading. Once the article is opened, this H1 is
   used as its full title.

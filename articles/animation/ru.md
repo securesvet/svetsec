@@ -1,4 +1,6 @@
 ---
+title: "Анимация"
+date: 2026-08-28
 labels:
   - animation
   - mathematics

@@ -103,6 +103,12 @@ pub enum CodeBlockAction {
     Copy { block: usize, row: u16 },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ArticleListRow {
+    Date(String),
+    Article(usize),
+}
+
 impl CodeBlockAction {
     #[must_use]
     pub const fn block(self) -> usize {
@@ -193,23 +199,18 @@ pub fn article_at(area: Rect, column: u16, row: u16, app: &App) -> Option<usize>
     {
         return None;
     }
-    let content = layout(area).content;
-    let primary = if content.width >= 76 {
-        Layout::horizontal([
-            Constraint::Percentage(68),
-            Constraint::Length(1),
-            Constraint::Percentage(32),
-        ])
-        .split(content)[0]
-    } else {
-        content
-    };
+    let (primary, compact) = articles_primary_panel(area);
     if column <= primary.left() || column >= primary.right().saturating_sub(1) {
         return None;
     }
     let first_row = primary.top().saturating_add(4);
-    let index = row.checked_sub(first_row)? as usize;
-    (index < app.articles().len().min(12)).then_some(index)
+    let row = usize::from(row.checked_sub(first_row)?);
+    article_list_rows(app, article_list_capacity(primary, compact))
+        .get(row)
+        .and_then(|row| match row {
+            ArticleListRow::Article(index) => Some(*index),
+            ArticleListRow::Date(_) => None,
+        })
 }
 
 #[must_use]
@@ -221,31 +222,94 @@ pub fn article_areas(area: Rect, app: &App) -> Vec<(usize, Rect)> {
     {
         return Vec::new();
     }
-    let content = layout(area).content;
-    let primary = if content.width >= 76 {
-        Layout::horizontal([
-            Constraint::Percentage(68),
-            Constraint::Length(1),
-            Constraint::Percentage(32),
-        ])
-        .split(content)[0]
-    } else {
-        content
-    };
+    let (primary, compact) = articles_primary_panel(area);
     let first_row = primary.top().saturating_add(4);
-    (0..app.articles().len().min(12))
-        .map(|index| {
-            (
+    article_list_rows(app, article_list_capacity(primary, compact))
+        .into_iter()
+        .enumerate()
+        .filter_map(|(row, entry)| {
+            let ArticleListRow::Article(index) = entry else {
+                return None;
+            };
+            Some((
                 index,
                 Rect::new(
                     primary.left().saturating_add(1),
-                    first_row.saturating_add(index as u16),
+                    first_row.saturating_add(row as u16),
                     primary.width.saturating_sub(2),
                     1,
                 ),
-            )
+            ))
         })
         .collect()
+}
+
+fn articles_primary_panel(area: Rect) -> (Rect, bool) {
+    let content = layout(area).content;
+    if content.width >= 76 {
+        (
+            Layout::horizontal([
+                Constraint::Percentage(68),
+                Constraint::Length(1),
+                Constraint::Percentage(32),
+            ])
+            .split(content)[0],
+            false,
+        )
+    } else {
+        (content, true)
+    }
+}
+
+fn article_list_capacity(area: Rect, compact: bool) -> usize {
+    let content_height = area.height.saturating_sub(if compact { 3 } else { 4 });
+    usize::from(content_height.saturating_sub(4))
+}
+
+fn article_list_rows(app: &App, capacity: usize) -> Vec<ArticleListRow> {
+    if capacity == 0 {
+        return Vec::new();
+    }
+    let undated = match app.language() {
+        Language::En => "Undated",
+        Language::Ru => "Без даты",
+    };
+    let mut rows = Vec::new();
+    let mut previous_date = None;
+    for (index, article) in app.articles().iter().enumerate() {
+        let date = if article.date.is_empty() {
+            undated
+        } else {
+            &article.date
+        };
+        if previous_date != Some(date) {
+            rows.push(ArticleListRow::Date(date.to_owned()));
+            previous_date = Some(date);
+        }
+        rows.push(ArticleListRow::Article(index));
+    }
+    if rows.len() <= capacity {
+        return rows;
+    }
+
+    let selected_row = rows
+        .iter()
+        .position(|row| *row == ArticleListRow::Article(app.selected_article_index()))
+        .unwrap_or_default();
+    let mut start = selected_row
+        .saturating_sub(capacity / 2)
+        .min(rows.len().saturating_sub(capacity));
+    while start > 0 && matches!(rows[start], ArticleListRow::Article(_)) {
+        start -= 1;
+    }
+    if selected_row >= start.saturating_add(capacity) {
+        start = selected_row.saturating_add(1).saturating_sub(capacity);
+    }
+    let mut visible = rows[start..rows.len().min(start.saturating_add(capacity))].to_vec();
+    while matches!(visible.last(), Some(ArticleListRow::Date(_))) {
+        visible.pop();
+    }
+    visible
 }
 
 #[must_use]
@@ -907,19 +971,8 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
     if app.article_loading() {
         let loading_width = area.width.saturating_sub(if compact { 4 } else { 6 });
         let content_height = area.height.saturating_sub(if compact { 3 } else { 4 });
-        if content_height > DOT_WELL_ROWS.saturating_add(2) {
-            lines.push(Line::default());
-        }
-        lines.push(Line::from(Span::styled(
-            match app.language() {
-                Language::En => "Loading Markdown…",
-                Language::Ru => "Загружаем Markdown…",
-            },
-            Style::new().fg(MUTED),
-        )));
-        let loader_height = content_height
-            .saturating_sub(lines.len().min(usize::from(u16::MAX)) as u16)
-            .min(DOT_WELL_ROWS);
+        let loader_height =
+            content_height.saturating_sub(lines.len().min(usize::from(u16::MAX)) as u16);
         lines.extend(dot_well_lines_with_height(
             loading_width,
             loader_height,
@@ -929,21 +982,18 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
             1.35,
         ));
     } else if app.articles_loading() {
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            match app.language() {
-                Language::En => "Loading article names…",
-                Language::Ru => "Загружаем названия статей…",
-            },
-            Style::new().fg(MUTED),
-        )));
-        for row in 0..5 {
-            lines.push(skeleton_line(
-                area.width.saturating_sub(if compact { 6 } else { 10 }),
-                row,
-                app.skeleton_phase(),
-            ));
-        }
+        let loading_width = area.width.saturating_sub(if compact { 4 } else { 6 });
+        let content_height = area.height.saturating_sub(if compact { 3 } else { 4 });
+        let loader_height =
+            content_height.saturating_sub(lines.len().min(usize::from(u16::MAX)) as u16);
+        lines.extend(dot_well_lines_with_height(
+            loading_width,
+            loader_height,
+            app.skeleton_phase(),
+            false,
+            3,
+            1.35,
+        ));
     } else if let Some(article) = app.opened_article() {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
@@ -1005,30 +1055,39 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
         )));
     } else {
         lines.push(Line::default());
-        for (index, article) in app.articles().iter().take(12).enumerate() {
-            let selected = index == app.selected_article_index();
-            let hovered = app.hovered() == Some(HelpTarget::Article(index));
-            let mut spans = vec![
-                Span::styled(
-                    if selected { "› " } else { "  " },
-                    Style::new().fg(INK).bold(),
-                ),
-                Span::styled(
-                    article.title(app.language()).to_owned(),
-                    if selected {
-                        Style::new().fg(WHITE).bg(CONTROL_ACTIVE).bold()
-                    } else if hovered {
-                        Style::new().fg(INK).bg(SOFT_GRAY).bold()
-                    } else {
-                        Style::new().fg(BODY)
-                    },
-                ),
-            ];
-            if !article.labels.is_empty() {
-                spans.push(Span::raw("  "));
-                spans.extend(label_spans(&article.labels));
+        for row in article_list_rows(app, article_list_capacity(area, compact)) {
+            match row {
+                ArticleListRow::Date(date) => lines.push(Line::from(vec![
+                    Span::styled("── ", Style::new().fg(MID_GRAY)),
+                    Span::styled(date, Style::new().fg(MUTED).bold()),
+                ])),
+                ArticleListRow::Article(index) => {
+                    let article = &app.articles()[index];
+                    let selected = index == app.selected_article_index();
+                    let hovered = app.hovered() == Some(HelpTarget::Article(index));
+                    let mut spans = vec![
+                        Span::styled(
+                            if selected { "› " } else { "  " },
+                            Style::new().fg(INK).bold(),
+                        ),
+                        Span::styled(
+                            article.title(app.language()).to_owned(),
+                            if selected {
+                                Style::new().fg(WHITE).bg(CONTROL_ACTIVE).bold()
+                            } else if hovered {
+                                Style::new().fg(INK).bg(SOFT_GRAY).bold()
+                            } else {
+                                Style::new().fg(BODY)
+                            },
+                        ),
+                    ];
+                    if !article.labels.is_empty() {
+                        spans.push(Span::raw("  "));
+                        spans.extend(label_spans(&article.labels));
+                    }
+                    lines.push(Line::from(spans));
+                }
             }
-            lines.push(Line::from(spans));
         }
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
@@ -1073,32 +1132,6 @@ fn label_spans(labels: &[String]) -> Vec<Span<'static>> {
             ]
         })
         .collect()
-}
-
-fn skeleton_line(width: u16, row: u8, phase: u8) -> Line<'static> {
-    let length = match row {
-        0 => width.saturating_mul(4) / 5,
-        1 => width.saturating_mul(3) / 5,
-        2 => width.saturating_mul(7) / 10,
-        3 => width.saturating_mul(1) / 2,
-        _ => width.saturating_mul(2) / 3,
-    }
-    .max(4);
-    let spans = (0..length)
-        .map(|column| {
-            let distance = (u16::from(phase) + column + u16::from(row) * 3) % 24;
-            let brightness = if distance < 12 {
-                225 + distance as u8
-            } else {
-                225 + (23 - distance) as u8
-            };
-            Span::styled(
-                " ",
-                Style::new().bg(Color::Rgb(brightness, brightness, brightness)),
-            )
-        })
-        .collect::<Vec<_>>();
-    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -2273,16 +2306,32 @@ mod tests {
     fn article_rows_are_mouse_targets() {
         let mut app = App::default();
         let _ = app.update(Message::SelectTab(Tab::Articles));
-        app.set_articles(vec![ArticleSummary {
-            slug: "one".into(),
-            title_en: "One".into(),
-            title_ru: "Один".into(),
-            published: true,
-            source_path: Some("articles/one.md".into()),
-            edit_url: None,
-            labels: Vec::new(),
-        }]);
-        assert_eq!(article_at(Rect::new(0, 0, 80, 24), 5, 7, &app), Some(0));
+        app.set_articles(vec![
+            ArticleSummary {
+                slug: "one".into(),
+                title_en: "One".into(),
+                title_ru: "Один".into(),
+                date: "2026-09-02".into(),
+                published: true,
+                source_path: Some("articles/one.md".into()),
+                edit_url: None,
+                labels: Vec::new(),
+            },
+            ArticleSummary {
+                slug: "two".into(),
+                title_en: "Two".into(),
+                title_ru: "Два".into(),
+                date: "2026-08-28".into(),
+                published: true,
+                source_path: Some("articles/two.md".into()),
+                edit_url: None,
+                labels: Vec::new(),
+            },
+        ]);
+        assert_eq!(article_at(Rect::new(0, 0, 80, 24), 5, 7, &app), None);
+        assert_eq!(article_at(Rect::new(0, 0, 80, 24), 5, 8, &app), Some(0));
+        assert_eq!(article_at(Rect::new(0, 0, 80, 24), 5, 9, &app), None);
+        assert_eq!(article_at(Rect::new(0, 0, 80, 24), 5, 10, &app), Some(1));
     }
 
     #[test]
@@ -2315,11 +2364,20 @@ mod tests {
     }
 
     #[test]
-    fn article_loader_uses_the_full_panel_and_never_clips_its_bottom() {
-        for area in [Rect::new(0, 0, 36, 20), Rect::new(0, 0, 100, 24)] {
+    fn article_loaders_use_the_full_panel_and_never_clip_their_bottom() {
+        for (area, list_loading) in [
+            (Rect::new(0, 0, 36, 20), false),
+            (Rect::new(0, 0, 36, 20), true),
+            (Rect::new(0, 0, 100, 24), false),
+            (Rect::new(0, 0, 100, 24), true),
+        ] {
             let mut app = App::default();
             let _ = app.update(Message::SelectTab(Tab::Articles));
-            app.begin_article_load();
+            if list_loading {
+                app.begin_articles_load();
+            } else {
+                app.begin_article_load();
+            }
             let backend = TestBackend::new(area.width, area.height);
             let mut terminal = Terminal::new(backend).expect("test terminal");
             terminal.draw(|frame| render(frame, &app)).unwrap();
@@ -2335,12 +2393,17 @@ mod tests {
             let compact = area.width < super::MOBILE_BREAKPOINT;
             let content = layout(area).content;
             let content_height = content.height.saturating_sub(if compact { 3 } else { 4 });
-            let loader_height = content_height.saturating_sub(2).min(super::DOT_WELL_ROWS);
+            let loader_height = content_height.saturating_sub(1);
             let loader_bottom = loader_top + loader_height.saturating_sub(1);
             assert!(row_text(loader_bottom).contains('╯'));
             assert!(loader_bottom < content.bottom());
 
-            let expected_right = area.right().saturating_sub(if compact { 3 } else { 4 });
+            let panel = if list_loading {
+                super::articles_primary_panel(area).0
+            } else {
+                content
+            };
+            let expected_right = panel.right().saturating_sub(if compact { 3 } else { 4 });
             assert_eq!(buffer[(expected_right, loader_top)].symbol(), "╮");
         }
     }

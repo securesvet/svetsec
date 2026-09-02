@@ -1,4 +1,6 @@
 ---
+title: "Привет, мир!"
+date: 2026-08-28
 labels:
   - cryptography
 ---

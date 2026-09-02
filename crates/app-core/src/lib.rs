@@ -278,6 +278,7 @@ pub struct ArticleSummary {
     pub slug: String,
     pub title_en: String,
     pub title_ru: String,
+    pub date: String,
     pub published: bool,
     pub source_path: Option<String>,
     pub edit_url: Option<String>,
@@ -372,7 +373,7 @@ pub struct App {
     profile_image: Option<ArticleImage>,
     python_running: bool,
     python_output: Option<String>,
-    skeleton_phase: u8,
+    skeleton_phase: u16,
     article_animation_phase: u16,
     article_scroll: u16,
     article_scroll_limit: u16,
@@ -429,7 +430,13 @@ impl App {
         self.language_notice_generation
     }
 
-    pub fn set_articles(&mut self, articles: Vec<ArticleSummary>) {
+    pub fn set_articles(&mut self, mut articles: Vec<ArticleSummary>) {
+        articles.sort_by(|left, right| {
+            right
+                .date
+                .cmp(&left.date)
+                .then_with(|| left.slug.cmp(&right.slug))
+        });
         self.articles = articles;
         self.articles_loaded = true;
         self.articles_loading = false;
@@ -589,7 +596,7 @@ impl App {
     }
 
     #[must_use]
-    pub const fn skeleton_phase(&self) -> u8 {
+    pub const fn skeleton_phase(&self) -> u16 {
         self.skeleton_phase
     }
 
@@ -784,7 +791,7 @@ impl App {
                 self.article_animation_phase = 0;
             }
             Message::AdvanceSkeleton => {
-                self.skeleton_phase = self.skeleton_phase.wrapping_add(1) % 24;
+                self.skeleton_phase = self.skeleton_phase.wrapping_add(1) % DOT_WELL_FRAMES;
             }
             Message::AdvanceArticleAnimation => {
                 if self.article_animation_active() {
@@ -1225,6 +1232,7 @@ mod tests {
                 slug: "one".into(),
                 title_en: "One".into(),
                 title_ru: "Один".into(),
+                date: "2026-09-02".into(),
                 published: true,
                 source_path: Some("articles/one.md".into()),
                 edit_url: Some("https://example.com/one".into()),
@@ -1234,6 +1242,7 @@ mod tests {
                 slug: "two".into(),
                 title_en: "Two".into(),
                 title_ru: "Два".into(),
+                date: "2026-08-28".into(),
                 published: true,
                 source_path: Some("articles/two.md".into()),
                 edit_url: Some("https://example.com/two".into()),

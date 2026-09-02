@@ -27,7 +27,7 @@ use svetsec_core::{
 use tokio::sync::{Mutex, mpsc::UnboundedSender, mpsc::unbounded_channel};
 
 use crate::db::{ArticleInput, Database};
-use crate::github::GithubSource;
+use crate::github::{GithubSource, valid_date};
 use crate::python::PyodideRunner;
 
 type SshTerminal = Terminal<CrosstermBackend<TerminalHandle>>;
@@ -513,6 +513,7 @@ impl SshServer {
                                 slug: article.slug,
                                 title_en: article.title_en,
                                 title_ru: article.title_ru,
+                                date: article.date,
                                 published: article.published,
                                 source_path: Some(article.source_path),
                                 edit_url: Some(article.edit_url),
@@ -623,6 +624,7 @@ struct VimEditor {
     command: String,
     slug: String,
     titles: [String; 2],
+    date: String,
     labels: Vec<String>,
     published: bool,
     dirty: bool,
@@ -644,6 +646,7 @@ impl VimEditor {
             command: String::new(),
             slug: format!("draft-{timestamp}"),
             titles: ["Untitled".into(), "Без названия".into()],
+            date: iso_date_from_unix(timestamp),
             labels: Vec::new(),
             published: false,
             dirty: false,
@@ -777,7 +780,8 @@ impl VimEditor {
             }
             "help" => {
                 self.status =
-                    ":title TEXT · :slug SLUG · :labels A,B · :lang en|ru · :export · :wq".into();
+                    ":title TEXT · :date YYYY-MM-DD · :labels A,B · :lang en|ru · :export · :wq"
+                        .into();
             }
             _ if command.starts_with("title ") => {
                 let index = self.language_index();
@@ -789,6 +793,16 @@ impl VimEditor {
                 self.slug = command[5..].trim().to_owned();
                 self.dirty = true;
                 self.status = "Slug updated".into();
+            }
+            _ if command.starts_with("date ") => {
+                let date = command[5..].trim();
+                if valid_date(date) {
+                    self.date = date.to_owned();
+                    self.dirty = true;
+                    self.status = "Publication date updated".into();
+                } else {
+                    self.status = "Date must use YYYY-MM-DD".into();
+                }
             }
             _ if command.starts_with("labels ") => match editor_labels(command[7..].trim()) {
                 Ok(labels) => {
@@ -829,7 +843,7 @@ impl VimEditor {
         let directory = std::path::Path::new(&directory).join(&self.slug);
         std::fs::create_dir_all(&directory)?;
         let path = directory.join(format!("{}.md", self.language.path_code()));
-        let frontmatter = if self.labels.is_empty() {
+        let labels = if self.labels.is_empty() {
             String::new()
         } else {
             let labels = self
@@ -838,8 +852,10 @@ impl VimEditor {
                 .map(|label| serde_json::to_string(label).map(|label| format!("  - {label}")))
                 .collect::<Result<Vec<_>, _>>()?
                 .join("\n");
-            format!("---\nlabels:\n{labels}\n---\n\n")
+            format!("labels:\n{labels}\n")
         };
+        let title = serde_json::to_string(&self.titles[self.language_index()])?;
+        let frontmatter = format!("---\ntitle: {title}\ndate: {}\n{labels}---\n\n", self.date);
         let markdown = format!(
             "{frontmatter}# {}\n\n{}\n",
             self.titles[self.language_index()],
@@ -927,6 +943,22 @@ fn valid_article_slug(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn iso_date_from_unix(timestamp: u64) -> String {
+    let days = (timestamp / 86_400) as i64;
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn editor_labels(value: &str) -> Result<Vec<String>> {
@@ -1057,7 +1089,7 @@ fn render_editor(frame: &mut ratatui::Frame<'_>, editor: &VimEditor) {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorMode, EditorOutcome, VimEditor, editor_labels};
+    use super::{EditorMode, EditorOutcome, VimEditor, editor_labels, iso_date_from_unix};
     use crate::db::Database;
     use svetsec_core::Language;
 
@@ -1094,5 +1126,7 @@ mod tests {
             ["Криптография"]
         );
         assert!(editor_labels("one,two,three,four,five,six,seven").is_err());
+        assert_eq!(iso_date_from_unix(0), "1970-01-01");
+        assert_eq!(iso_date_from_unix(1_788_134_400), "2026-08-31");
     }
 }

@@ -1,4 +1,6 @@
 ---
+title: "PicoCTF: Vigenere"
+date: 2025-04-26
 labels:
   - cryptography
   - ctf

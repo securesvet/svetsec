@@ -1,4 +1,6 @@
 ---
+title: "Alfa CTF: Developer on the beach"
+date: 2025-09-14
 labels:
   - ctf
   - security

@@ -1,4 +1,6 @@
 ---
+title: "Hello world!"
+date: 2026-08-28
 labels:
   - cryptography
 ---

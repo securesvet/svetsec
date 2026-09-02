@@ -10,12 +10,13 @@ use image::{GenericImageView, imageops::FilterType};
 use reqwest::{Client, header};
 use serde::{Deserialize, Serialize};
 use svetsec_core::Language;
-use tokio::sync::RwLock;
+use tokio::{io::AsyncReadExt, sync::RwLock};
 
 const LIST_CACHE_TTL: Duration = Duration::from_secs(60);
 const BODY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_ARTICLE_IMAGES: usize = 4;
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_FRONTMATTER_BYTES: u64 = 16 * 1024;
 const IMAGE_WIDTH: u32 = 32;
 const IMAGE_PIXEL_HEIGHT: u32 = 32;
 
@@ -45,6 +46,7 @@ pub struct GithubArticle {
     pub slug: String,
     pub title_en: String,
     pub title_ru: String,
+    pub date: String,
     pub published: bool,
     pub source_path: String,
     pub edit_url: String,
@@ -86,6 +88,13 @@ struct ContentsEntry {
     size: u64,
     #[serde(rename = "type")]
     kind: String,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct ArticleFrontmatter {
+    title: Option<String>,
+    date: Option<String>,
+    labels: Vec<String>,
 }
 
 impl GithubSource {
@@ -190,20 +199,23 @@ impl GithubSource {
                 .context("GitHub returned an invalid article language list")?;
             if let Some(entry) = preferred_variant(&variants, language) {
                 let slug = directory.name;
+                let metadata = self.remote_frontmatter(&entry.path).await?;
+                let title = metadata.title.unwrap_or_else(|| title_from_slug(&slug));
                 articles.push(GithubArticle {
-                    title_en: title_from_slug(&slug),
-                    title_ru: title_from_slug(&slug),
+                    title_en: title.clone(),
+                    title_ru: title,
+                    date: metadata.date.unwrap_or_default(),
                     slug,
                     published: true,
                     edit_url: format!("{edit_base}{}", entry.path),
                     source_path: entry.path.clone(),
                     size: entry.size,
                     sha: entry.sha.clone(),
-                    labels: Vec::new(),
+                    labels: metadata.labels,
                 });
             }
         }
-        articles.sort_by(|left, right| left.slug.cmp(&right.slug));
+        sort_articles(&mut articles);
         self.0.list_cache.write().await.insert(
             cache_key.to_owned(),
             Cached {
@@ -231,7 +243,7 @@ impl GithubSource {
         }
 
         let (source, resolved_language) = self.markdown(slug, language).await?;
-        let labels = frontmatter_labels(&source);
+        let metadata = article_frontmatter(&source);
         let markdown = markdown_body(&source).to_owned();
         let mut images = Vec::new();
         for (alt, source) in markdown_images(&markdown)
@@ -245,10 +257,13 @@ impl GithubSource {
         }
         let article = GithubArticleBody {
             slug: slug.to_owned(),
-            title: markdown_title(&markdown).unwrap_or_else(|| title_from_slug(slug)),
+            title: metadata
+                .title
+                .or_else(|| markdown_title(&markdown))
+                .unwrap_or_else(|| title_from_slug(slug)),
             markdown,
             images,
-            labels,
+            labels: metadata.labels,
             language: resolved_language.path_code().to_owned(),
         };
         if self.0.articles_dir.is_none() {
@@ -408,6 +423,30 @@ impl GithubSource {
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("article is missing")))
     }
 
+    async fn remote_frontmatter(&self, path: &str) -> Result<ArticleFrontmatter> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/contents/{path}",
+            self.0.owner, self.0.repository
+        );
+        let bytes = self
+            .request(self.0.client.get(url))
+            .header(header::ACCEPT, "application/vnd.github.raw+json")
+            .header(
+                header::RANGE,
+                format!("bytes=0-{}", MAX_FRONTMATTER_BYTES - 1),
+            )
+            .query(&[("ref", &self.0.branch)])
+            .send()
+            .await
+            .context("GitHub article frontmatter request failed")?
+            .error_for_status()
+            .context("GitHub rejected article frontmatter request")?
+            .bytes()
+            .await
+            .context("GitHub returned invalid article frontmatter")?;
+        Ok(article_frontmatter(&String::from_utf8_lossy(&bytes)))
+    }
+
     async fn local_list(&self, directory: &Path, language: Language) -> Result<Vec<GithubArticle>> {
         let mut entries = tokio::fs::read_dir(directory)
             .await
@@ -427,27 +466,51 @@ impl GithubSource {
                 continue;
             };
             let metadata = tokio::fs::metadata(&path).await?;
+            let frontmatter = local_frontmatter(&path).await?;
             let modified = metadata
                 .modified()
                 .ok()
                 .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .map_or(0, |duration| duration.as_nanos());
             let source_path = format!("articles/{name}/{}.md", resolved_language.path_code());
+            let title = frontmatter.title.unwrap_or_else(|| title_from_slug(&name));
             articles.push(GithubArticle {
-                title_en: title_from_slug(&name),
-                title_ru: title_from_slug(&name),
+                title_en: title.clone(),
+                title_ru: title,
+                date: frontmatter.date.unwrap_or_default(),
                 edit_url: self.editor_url(Some(&source_path)),
                 source_path,
                 size: metadata.len(),
                 sha: format!("local-{}-{modified}", metadata.len()),
                 slug: name,
                 published: true,
-                labels: Vec::new(),
+                labels: frontmatter.labels,
             });
         }
-        articles.sort_by(|left, right| left.slug.cmp(&right.slug));
+        sort_articles(&mut articles);
         Ok(articles)
     }
+}
+
+async fn local_frontmatter(path: &Path) -> Result<ArticleFrontmatter> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("could not open local article: {}", path.display()))?;
+    let mut prefix = Vec::new();
+    file.take(MAX_FRONTMATTER_BYTES)
+        .read_to_end(&mut prefix)
+        .await
+        .with_context(|| format!("could not preload frontmatter: {}", path.display()))?;
+    Ok(article_frontmatter(&String::from_utf8_lossy(&prefix)))
+}
+
+fn sort_articles(articles: &mut [GithubArticle]) {
+    articles.sort_by(|left, right| {
+        right
+            .date
+            .cmp(&left.date)
+            .then_with(|| left.slug.cmp(&right.slug))
+    });
 }
 
 fn preferred_variant(entries: &[ContentsEntry], language: Language) -> Option<&ContentsEntry> {
@@ -635,19 +698,25 @@ fn markdown_body(markdown: &str) -> &str {
     markdown
 }
 
-fn frontmatter_labels(markdown: &str) -> Vec<String> {
+fn article_frontmatter(markdown: &str) -> ArticleFrontmatter {
     let mut lines = markdown.lines();
     if lines.next().map(str::trim) != Some("---") {
-        return Vec::new();
+        return ArticleFrontmatter::default();
     }
-    let mut labels = Vec::new();
+    let mut metadata = ArticleFrontmatter::default();
     let mut reading_labels = false;
     for line in lines {
         let trimmed = line.trim();
         if trimmed == "---" {
             break;
         }
-        if let Some(value) = trimmed.strip_prefix("labels:") {
+        if let Some(value) = trimmed.strip_prefix("title:") {
+            metadata.title = frontmatter_value(value, 160);
+            reading_labels = false;
+        } else if let Some(value) = trimmed.strip_prefix("date:") {
+            metadata.date = frontmatter_value(value, 10).filter(|value| valid_date(value));
+            reading_labels = false;
+        } else if let Some(value) = trimmed.strip_prefix("labels:") {
             reading_labels = true;
             let value = value.trim();
             if let Some(inner) = value
@@ -655,22 +724,52 @@ fn frontmatter_labels(markdown: &str) -> Vec<String> {
                 .and_then(|value| value.strip_suffix(']'))
             {
                 for label in inner.split(',') {
-                    push_label(&mut labels, label);
+                    push_label(&mut metadata.labels, label);
                 }
                 reading_labels = false;
             } else if !value.is_empty() {
-                push_label(&mut labels, value);
+                push_label(&mut metadata.labels, value);
                 reading_labels = false;
             }
         } else if reading_labels {
             if let Some(label) = trimmed.strip_prefix('-') {
-                push_label(&mut labels, label);
+                push_label(&mut metadata.labels, label);
             } else if !trimmed.is_empty() {
                 reading_labels = false;
             }
         }
     }
-    labels
+    metadata
+}
+
+#[cfg(test)]
+fn frontmatter_labels(markdown: &str) -> Vec<String> {
+    article_frontmatter(markdown).labels
+}
+
+fn frontmatter_value(value: &str, max_chars: usize) -> Option<String> {
+    let value = value.trim().trim_matches(['\'', '"']);
+    (!value.is_empty()
+        && value.chars().count() <= max_chars
+        && !value.chars().any(char::is_control))
+    .then(|| value.to_owned())
+}
+
+pub(crate) fn valid_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if !(bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit()))
+    {
+        return false;
+    }
+    let month = value[5..7].parse::<u8>().unwrap_or_default();
+    let day = value[8..10].parse::<u8>().unwrap_or_default();
+    (1..=12).contains(&month) && (1..=31).contains(&day)
 }
 
 fn push_label(labels: &mut Vec<String>, value: &str) {
@@ -697,8 +796,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        GithubSource, article_asset_path, frontmatter_labels, markdown_body, markdown_images,
-        markdown_title, rasterize_image, title_from_slug, valid_slug,
+        GithubSource, article_asset_path, article_frontmatter, frontmatter_labels, markdown_body,
+        markdown_images, markdown_title, rasterize_image, title_from_slug, valid_slug,
     };
 
     #[test]
@@ -725,6 +824,17 @@ mod tests {
 
     #[test]
     fn frontmatter_labels_support_lists_and_case_insensitive_deduplication() {
+        let metadata = article_frontmatter(
+            "---\ntitle: \"A localized title\"\ndate: 2026-09-02\nlabels: [rust]\n---\n# Title",
+        );
+        assert_eq!(metadata.title.as_deref(), Some("A localized title"));
+        assert_eq!(metadata.date.as_deref(), Some("2026-09-02"));
+        assert_eq!(metadata.labels, ["rust"]);
+        assert!(
+            article_frontmatter("---\ndate: 02/09/2026\n---")
+                .date
+                .is_none()
+        );
         assert_eq!(
             frontmatter_labels(
                 "---\nlabels:\n  - cryptography\n  - CRYPTOGRAPHY\n  - Rust\n---\n# Title"
@@ -769,7 +879,7 @@ mod tests {
             .unwrap();
         tokio::fs::write(
             directory.join("hello-local/en.md"),
-            "---\nlabels: [cryptography]\n---\n# Local title\n\nFirst version\n",
+            "---\ntitle: \"Local title\"\ndate: 2026-09-02\nlabels: [cryptography]\n---\n# Local title\n\nFirst version\n",
         )
         .await
         .unwrap();
@@ -790,6 +900,9 @@ mod tests {
         let articles = source.list(false, Language::Ru).await.unwrap();
         assert_eq!(articles.len(), 1);
         assert_eq!(articles[0].slug, "hello-local");
+        assert_eq!(articles[0].title_en, "Local title");
+        assert_eq!(articles[0].date, "2026-09-02");
+        assert_eq!(articles[0].labels, ["cryptography"]);
         assert!(articles[0].source_path.ends_with("/en.md"));
         let article = source.article("hello-local", Language::Ru).await.unwrap();
         assert_eq!(article.title, "Local title");

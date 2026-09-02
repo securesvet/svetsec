@@ -20,9 +20,10 @@ adds SQLite-backed owner sessions, live owner presence, and articles.
 - The owner can open Articles and press `e` over SSH to enter the terminal
   editor. Article writes are enforced server-side.
 - Published Markdown is discovered from `main/articles` through the server.
-  The directory list loads first; a language file body is fetched only when
-  opened. While it loads, the shared dot-well animation shows three large
-  moving wells.
+  Localized `title`, ISO `date`, and labels are preloaded from frontmatter, then
+  the index is sorted newest-first and separated into date groups. A language
+  file body is fetched only when opened. Both loading states fill the article
+  panel with the shared three-well Gaussian braille animation.
 - Browser history uses `/`, `/articles`, `/articles/<slug>`, `/projects`, and `/info`, so a
   refresh or Back/Forward navigation preserves the current screen.
 - Every browser click target has pointer and hover feedback: menu tabs, article
@@ -148,7 +149,7 @@ In the owner session, open Articles (`2`) and press `e`. Editor commands:
 - `i`, `a`, `o`: enter Insert mode
 - `Esc`: return to Normal mode
 - `h`, `j`, `k`, `l`, `x`: cursor movement/deletion
-- `:title TEXT`, `:slug SLUG`: edit metadata
+- `:title TEXT`, `:slug SLUG`, `:date YYYY-MM-DD`: edit metadata
 - `:labels cryptography, python`: set frontmatter labels (`:labels` clears them)
 - `:lang en` / `:lang ru`: switch the article language buffer
 - `:publish` / `:draft`: change publication state
@@ -163,10 +164,10 @@ Python execution uses `p/з`.
 ## Markdown articles from GitHub
 
 Push public articles to both `articles/<slug>/en.md` and
-`articles/<slug>/ru.md` on `main`. The list title is derived from the directory,
-while the selected language file and its `# H1` title are loaded only when a
-visitor opens the article. A fallback remains available if one translation is
-temporarily absent. Files beginning with `_` are ignored; see
+`articles/<slug>/ru.md` on `main`. The list preloads localized `title`, `date`,
+and labels from frontmatter, while the selected language file body is loaded
+only when a visitor opens the article. A fallback remains available if one
+translation is temporarily absent. Files beginning with `_` are ignored; see
 `articles/_FORMAT.md` for the supported skeleton.
 
 Public repositories need no GitHub token. If the repository becomes private or
