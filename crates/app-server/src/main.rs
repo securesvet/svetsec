@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let address: SocketAddr = env_or("SVETSEC_HTTP_ADDR", "127.0.0.1:3000").parse()?;
     let static_dir = env_or("SVETSEC_STATIC_DIR", "dist");
     let secure_cookie = env_or("SVETSEC_SECURE_COOKIE", "true") != "false";
-    let articles_dir = match env_or("SVETSEC_ARTICLES_SOURCE", "github").as_str() {
+    let articles_dir = match env_or("SVETSEC_ARTICLES_SOURCE", "local").as_str() {
         "github" => None,
         "local" => Some(PathBuf::from(env_or("SVETSEC_ARTICLES_DIR", "articles"))),
         _ => return Err("SVETSEC_ARTICLES_SOURCE must be `github` or `local`".into()),

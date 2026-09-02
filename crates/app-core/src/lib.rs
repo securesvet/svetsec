@@ -955,7 +955,7 @@ impl App {
         let raw_blocks = markdown_code_blocks(&article.markdown);
         let mut code_blocks = Vec::new();
         let mut rows = vec![
-            "● SYNC  //  GITHUB main/articles".to_owned(),
+            "● LOCAL  //  articles/".to_owned(),
             String::new(),
             article.title.clone(),
         ];

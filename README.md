@@ -124,7 +124,7 @@ Browser shortcuts (article navigation keys are shared with SSH):
 - `Enter`/`o`: open the selected Markdown article
 - `e`: edit the selected article on GitHub; creates one if the list is empty
 - `n`: create a new Markdown article on GitHub
-- `f`: refresh the filename list after a GitHub commit
+- `f`: reload the article index from the configured source
 - `p`: run the focused committed `python`/`python3`/`py` fence through Pyodide
 - `c`: copy the focused code block (`OSC 52` is used over SSH)
 - `Esc` or the visible Back control: close the article
@@ -170,23 +170,23 @@ only when a visitor opens the article. A fallback remains available if one
 translation is temporarily absent. Files beginning with `_` are ignored; see
 `articles/_FORMAT.md` for the supported skeleton.
 
-Public repositories need no GitHub token. If the repository becomes private or
-the anonymous API limit is too small, set `SVETSEC_GITHUB_TOKEN` on the server
-to a fine-grained token with read-only Contents permission. Never expose it to
-the WASM client.
-
-For local development, add this to `.env`:
+Articles use the repository's local `articles/` directory by default:
 
 ```sh
 SVETSEC_ARTICLES_SOURCE='local'
 SVETSEC_ARTICLES_DIR='articles'
 ```
 
-The browser and SSH server will then read Markdown and images directly from
-the local `articles/` folder. Local files bypass the GitHub/body caches, so
-closing and reopening an article shows the latest saved content. Set
-`SVETSEC_ARTICLES_SOURCE=github` (the default) in production to use the
-configured GitHub repository again.
+The browser and SSH server read Markdown and images directly from this folder.
+The production Docker image includes the same directory, so a push to `main`
+publishes article changes atomically with the normal deployment and makes no
+GitHub API requests at runtime. Article-only changes reuse the compiled
+application layers during the Docker build.
+
+Set `SVETSEC_ARTICLES_SOURCE=github` only if a deployment must read another
+repository dynamically. Public repositories need no token, but this mode is
+subject to GitHub API limits; private repositories require a server-side
+fine-grained token with read-only Contents permission.
 
 ## API and data model
 

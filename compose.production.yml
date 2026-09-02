@@ -12,6 +12,7 @@ services:
       SVETSEC_SSH_ADDR: 0.0.0.0:2222
       SVETSEC_STATIC_DIR: /app/dist
       SVETSEC_DATABASE: /data/svetsec.db
+      SVETSEC_ARTICLES_SOURCE: local
       SVETSEC_ARTICLES_DIR: /app/articles
       SVETSEC_OWNER_PUBLIC_KEY_FILE: /run/svetsec/owner_ed25519.pub
       SVETSEC_SSH_HOST_KEY_FILE: /run/svetsec/ssh_host_ed25519_key

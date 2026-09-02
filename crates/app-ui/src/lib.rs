@@ -312,6 +312,116 @@ fn article_list_rows(app: &App, capacity: usize) -> Vec<ArticleListRow> {
     visible
 }
 
+fn article_date_label(date: &str, language: Language, compact: bool) -> String {
+    let Some((year, month, day)) = parse_iso_date(date) else {
+        return date.to_owned();
+    };
+    const WEEKDAYS_EN: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    const WEEKDAYS_RU: [&str; 7] = [
+        "Воскресенье",
+        "Понедельник",
+        "Вторник",
+        "Среда",
+        "Четверг",
+        "Пятница",
+        "Суббота",
+    ];
+    const WEEKDAYS_EN_SHORT: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const WEEKDAYS_RU_SHORT: [&str; 7] = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+    const MONTHS_EN: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    const MONTHS_RU: [&str; 12] = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+    ];
+    const MONTHS_EN_SHORT: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const MONTHS_RU_SHORT: [&str; 12] = [
+        "янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек",
+    ];
+    let weekday = weekday_index(year, month, day);
+    let month_index = month as usize - 1;
+    match (language, compact) {
+        (Language::En, false) => format!(
+            "{} {} · {} · {year}",
+            MONTHS_EN[month_index], day, WEEKDAYS_EN[weekday]
+        ),
+        (Language::Ru, false) => format!(
+            "{} {} · {} · {year}",
+            day, MONTHS_RU[month_index], WEEKDAYS_RU[weekday]
+        ),
+        (Language::En, true) => format!(
+            "{} {} · {} · {year}",
+            MONTHS_EN_SHORT[month_index], day, WEEKDAYS_EN_SHORT[weekday]
+        ),
+        (Language::Ru, true) => format!(
+            "{} {} · {} · {year}",
+            day, MONTHS_RU_SHORT[month_index], WEEKDAYS_RU_SHORT[weekday]
+        ),
+    }
+}
+
+fn parse_iso_date(date: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = date.split('-');
+    let year = parts.next()?.parse::<u32>().ok()?;
+    let month = parts.next()?.parse::<u32>().ok()?;
+    let day = parts.next()?.parse::<u32>().ok()?;
+    if parts.next().is_some() || year == 0 || !(1..=12).contains(&month) {
+        return None;
+    }
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=days_in_month)
+        .contains(&day)
+        .then_some((year, month, day))
+}
+
+fn weekday_index(year: u32, month: u32, day: u32) -> usize {
+    const MONTH_OFFSETS: [u32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let adjusted_year = year - u32::from(month < 3);
+    ((adjusted_year + adjusted_year / 4 - adjusted_year / 100
+        + adjusted_year / 400
+        + MONTH_OFFSETS[month as usize - 1]
+        + day)
+        % 7) as usize
+}
+
 #[must_use]
 pub fn article_back_area(area: Rect, app: &App) -> Option<Rect> {
     (app.selected() == Tab::Articles && app.opened_article().is_some()).then(|| {
@@ -956,15 +1066,12 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
                     .fg(Color::Rgb(143, 199, 242))
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             ),
-            Span::styled(
-                "   ● SYNC  //  GITHUB main/articles",
-                Style::new().fg(MUTED),
-            ),
+            Span::styled("   ● LOCAL  //  articles/", Style::new().fg(MUTED)),
         ])
     } else {
         Line::from(vec![
-            Span::styled("● SYNC", Style::new().fg(INK).bold()),
-            Span::styled("  //  GITHUB main/articles", Style::new().fg(MUTED)),
+            Span::styled("● LOCAL", Style::new().fg(INK).bold()),
+            Span::styled("  //  articles/", Style::new().fg(MUTED)),
         ])
     }];
 
@@ -1059,7 +1166,10 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
             match row {
                 ArticleListRow::Date(date) => lines.push(Line::from(vec![
                     Span::styled("── ", Style::new().fg(MID_GRAY)),
-                    Span::styled(date, Style::new().fg(MUTED).bold()),
+                    Span::styled(
+                        article_date_label(&date, app.language(), compact),
+                        Style::new().fg(MUTED).bold(),
+                    ),
                 ])),
                 ArticleListRow::Article(index) => {
                     let article = &app.articles()[index];
@@ -1092,7 +1202,7 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
             match app.language() {
-                Language::En => "j/k select · Enter/o open · e edit · n new · f refresh",
+                Language::En => "j/k select · Enter/o open · e edit · n new · f reload",
                 Language::Ru => "о/л выбор · Enter/щ открыть · у правка · т новая · а обновить",
             },
             Style::new().fg(MUTED),
@@ -2163,7 +2273,7 @@ fn interpolate(start: Color, end: Color, position: u16, denominator: u16) -> Col
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
-    use svetsec_core::{App, ArticleContent, ArticleImage, ArticleSummary, Message, Tab};
+    use svetsec_core::{App, ArticleContent, ArticleImage, ArticleSummary, Language, Message, Tab};
 
     use super::{
         CodeBlockAction, article_at, article_back_area, article_cursor_at, article_viewport_rows,
@@ -2332,6 +2442,34 @@ mod tests {
         assert_eq!(article_at(Rect::new(0, 0, 80, 24), 5, 8, &app), Some(0));
         assert_eq!(article_at(Rect::new(0, 0, 80, 24), 5, 9, &app), None);
         assert_eq!(article_at(Rect::new(0, 0, 80, 24), 5, 10, &app), Some(1));
+    }
+
+    #[test]
+    fn article_dates_include_localized_month_weekday_day_and_year() {
+        assert_eq!(
+            super::article_date_label("2026-09-02", Language::En, false),
+            "September 2 · Wednesday · 2026"
+        );
+        assert_eq!(
+            super::article_date_label("2026-09-02", Language::Ru, false),
+            "2 сентября · Среда · 2026"
+        );
+        assert_eq!(
+            super::article_date_label("2024-02-29", Language::En, false),
+            "February 29 · Thursday · 2024"
+        );
+        assert_eq!(
+            super::article_date_label("Без даты", Language::Ru, false),
+            "Без даты"
+        );
+        assert_eq!(
+            super::article_date_label("2026-09-02", Language::En, true),
+            "Sep 2 · Wed · 2026"
+        );
+        assert_eq!(
+            super::article_date_label("2026-09-02", Language::Ru, true),
+            "2 сен · Ср · 2026"
+        );
     }
 
     #[test]
