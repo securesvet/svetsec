@@ -745,7 +745,7 @@ pub fn comment_action_at(area: Rect, column: u16, row: u16, app: &App) -> Option
 
 #[must_use]
 pub fn native_image_placements<'a>(area: Rect, app: &'a App) -> Vec<ArticleImagePlacement<'a>> {
-    if app.language_notice() {
+    if app.language_notice() || app.article_loading() {
         return Vec::new();
     }
     let Some(viewport) = native_image_viewport(area, app) else {
@@ -2832,6 +2832,13 @@ mod tests {
         );
         assert_eq!(before_y[0] - after[0].y, i32::from(app.article_scroll()));
         assert_eq!(before_y[1] - after[1].y, i32::from(app.article_scroll()));
+        drop(after);
+
+        app.begin_article_load();
+        assert!(
+            native_image_placements(area, &app).is_empty(),
+            "the previous article's images must not cover the loading frame"
+        );
     }
 
     #[test]

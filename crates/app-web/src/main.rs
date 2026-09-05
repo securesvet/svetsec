@@ -314,8 +314,10 @@ fn main() -> io::Result<()> {
             let sync_app = Rc::clone(&app_handle);
             let sync_image_ids = Rc::clone(&browser_image_ids);
             let area = frame.area();
+            // `spawn_local` schedules this work for the next microtask. The DOM
+            // backend has finished writing the Ratatui cells by then, while the
+            // browser has not painted an undecorated intermediate frame yet.
             spawn_local(async move {
-                TimeoutFuture::new(0).await;
                 let app = sync_app.borrow();
                 let _ = sync_browser_tabs(area, &app);
                 let _ = sync_browser_articles(area, &app);
@@ -324,9 +326,9 @@ fn main() -> io::Result<()> {
                 let _ = sync_browser_code_actions(area, &app);
                 let _ = sync_browser_output_close(area, &app);
                 let _ = sync_browser_comment_actions(area, &app);
-                let _ = sync_browser_images(&app, area, &sync_image_ids);
                 let _ = sync_mobile_controls(&app);
                 let _ = sync_browser_native_scroll(&app);
+                let _ = sync_browser_images(&app, area, &sync_image_ids);
                 let _ = sync_browser_text_selection();
             });
         }
@@ -527,7 +529,8 @@ fn sync_browser_native_scroll(app: &App) -> Result<(), JsValue> {
     let Some(terminal) = document.get_element_by_id("terminal") else {
         return Ok(());
     };
-    let article_open = app.selected() == Tab::Articles && app.opened_article().is_some();
+    let article_open =
+        app.selected() == Tab::Articles && app.opened_article().is_some() && !app.article_loading();
     if !article_open {
         terminal.remove_attribute("data-native-scroll")?;
         terminal.set_scroll_top(0);
