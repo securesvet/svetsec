@@ -305,9 +305,17 @@ fn main() -> io::Result<()> {
         let app_handle = Rc::clone(&app);
         let mut app = app.borrow_mut();
         app.set_article_viewport_rows(svetsec_ui::article_viewport_rows(frame.area()));
-        svetsec_ui::render(frame, &app);
         let signature = DomSignature::new(frame.area(), &app);
-        let changed = dom_signature.borrow().as_ref() != Some(&signature);
+        let previous_signature = dom_signature.borrow();
+        let changed = previous_signature.as_ref() != Some(&signature);
+        let structural_transition = previous_signature
+            .as_ref()
+            .is_some_and(|previous| structural_dom_transition(previous, &signature));
+        drop(previous_signature);
+        if structural_transition {
+            let _ = reset_browser_transition_dom(&browser_image_ids);
+        }
+        svetsec_ui::render(frame, &app);
         sync_browser_route(&app, &route_state);
         if changed {
             *dom_signature.borrow_mut() = Some(signature);
@@ -333,6 +341,45 @@ fn main() -> io::Result<()> {
             });
         }
     });
+    Ok(())
+}
+
+fn structural_dom_transition(previous: &DomSignature, next: &DomSignature) -> bool {
+    previous.area != next.area
+        || previous.selected != next.selected
+        || previous.language != next.language
+        || previous.articles_loading != next.articles_loading
+        || previous.article_loading != next.article_loading
+        || previous.opened_slug != next.opened_slug
+}
+
+fn reset_browser_transition_dom(image_ids: &RefCell<Vec<String>>) -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    if let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") {
+        grid.remove_attribute("data-block-selection")?;
+        let decorated = grid.query_selector_all("span[class], span[data-text-block]")?;
+        for index in 0..decorated.length() {
+            if let Some(node) = decorated.item(index)
+                && let Some(cell) = node.dyn_ref::<web_sys::Element>()
+            {
+                cell.remove_attribute("class")?;
+                cell.remove_attribute("data-text-block")?;
+            }
+        }
+    }
+    if let Some(layer) = document.get_element_by_id("article-media-layer") {
+        layer.set_text_content(None);
+    }
+    image_ids.borrow_mut().clear();
+    if let Some(terminal) = document.get_element_by_id("terminal") {
+        terminal.remove_attribute("data-native-scroll")?;
+        terminal.set_scroll_top(0);
+    }
+    if let Some(spacer) = document.get_element_by_id("web-article-scroll-spacer") {
+        spacer.remove();
+    }
     Ok(())
 }
 
@@ -2339,8 +2386,8 @@ mod tests {
     use svetsec_core::{App, ArticleContent, Message, Tab};
 
     use super::{
-        WebRoute, browser_image_id, browser_key_code, cell_contains_selectable_text, grid_axis,
-        grid_cell_axis, selection_runs,
+        DomSignature, WebRoute, browser_image_id, browser_key_code, cell_contains_selectable_text,
+        grid_axis, grid_cell_axis, selection_runs, structural_dom_transition,
     };
 
     #[test]
@@ -2391,6 +2438,26 @@ mod tests {
         assert_eq!(first, browser_image_id(0, "assets/first.jpg"));
         assert_ne!(first, browser_image_id(1, "assets/first.jpg"));
         assert_ne!(first, browser_image_id(0, "assets/second.jpg"));
+    }
+
+    #[test]
+    fn view_changes_clear_stale_dom_decorations_before_the_next_paint() {
+        let area = ratzilla::ratatui::layout::Rect::new(0, 0, 100, 30);
+        let mut app = App::default();
+        let main = DomSignature::new(area, &app);
+
+        let _ = app.update(Message::SelectTab(Tab::Projects));
+        let projects = DomSignature::new(area, &app);
+        assert!(structural_dom_transition(&main, &projects));
+
+        let _ = app.update(Message::Hover(Some(svetsec_core::HelpTarget::Logo)));
+        let hovered = DomSignature::new(area, &app);
+        assert!(!structural_dom_transition(&projects, &hovered));
+
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.begin_article_load();
+        let loading = DomSignature::new(area, &app);
+        assert!(structural_dom_transition(&hovered, &loading));
     }
 
     #[test]
