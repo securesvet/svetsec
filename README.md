@@ -1,22 +1,24 @@
 # svetsec.ru
 
 One Ratatui interface for the browser, a local terminal, and SSH. The server
-adds SQLite-backed owner sessions, live owner presence, and articles.
+adds SQLite-backed accounts, sessions, article comments, and articles.
 
 ## What is implemented
 
-- The dot beside `svetsec.ru` is green while an authenticated owner session is
-  active in the browser or over SSH. Presence expires after 45 seconds without
-  a heartbeat.
+- The dot beside `svetsec.ru` is a neutral brand mark; the site does not publish
+  whether the owner is currently online.
 - `r` switches the language in the browser and terminal; the destination
   country's flag appears for 1.5 seconds as confirmation.
-- Desktop mouse hover shows a short single-line hint in the footer. Hovering
-  the logo explains the green presence dot.
+- Desktop mouse hover shows a short single-line hint in the footer.
 - Browser owner login uses an Argon2id password hash and an opaque
   `HttpOnly; SameSite=Strict` cookie. Only a SHA-256 hash of the random session
   token is stored in SQLite.
+- Visitors can register a username and password, log in, and leave comments on
+  articles. Reader passwords use the same salted Argon2id storage, and comments
+  are rate-limited server-side.
 - SSH identifies the owner by username plus a verified public key. Other
-  usernames get a read-only guest session.
+  visitors can use a guest session or authenticate with a registered username
+  and password to comment.
 - The owner can open Articles and press `e` over SSH to enter the terminal
   editor. Article writes are enforced server-side.
 - Published Markdown is discovered from `main/articles` through the server.
@@ -24,11 +26,11 @@ adds SQLite-backed owner sessions, live owner presence, and articles.
   the index is sorted newest-first and separated into date groups. A language
   file body is fetched only when opened. Both loading states fill the article
   panel with the shared three-well Gaussian braille animation.
-- Browser history uses `/`, `/articles`, `/articles/<slug>`, `/projects`, and `/info`, so a
-  refresh or Back/Forward navigation preserves the current screen.
+- Browser history uses `/`, `/articles`, `/articles/<slug>`, `/projects`, and
+  `/info`, so a refresh or Back/Forward navigation preserves the current screen.
 - Every browser click target has pointer and hover feedback: menu tabs, article
   rows, project cards, code actions, and the Python output close button.
-- The browser UI fills the visual viewport and uses a dark palette. Open
+- The browser UI fills the visual viewport and uses a light palette. Open
   articles use native browser wheel/touch scrolling, expose a real scrollbar,
   and constrain text selection to the paragraph or code block where the drag
   started. They also have a visible Back action plus large touch controls on
@@ -37,8 +39,9 @@ adds SQLite-backed owner sessions, live owner presence, and articles.
   true-color previews over SSH.
 - Article frontmatter provides colored labels. Python fences from the selected
   article source can be executed through the same server-side Pyodide runner
-  from the browser or SSH. Output temporarily replaces the right-hand telemetry
-  panel and remains there until `x` (or its close button) is used.
+  from the browser or SSH. The right-hand article panel contains comments;
+  Python output temporarily replaces it and remains there until `x` (or its
+  close button) is used.
   Label matching is case-insensitive; unknown labels keep a deterministic
   palette color.
 - Info links to the generated PDF resume at `/resume`. Its Typst source lives in
@@ -67,7 +70,7 @@ trunk build --release
 ```
 
 The server serves the resulting `dist/` directory itself. A static-only Pages
-deployment is no longer sufficient because sessions, presence, articles, and
+deployment is no longer sufficient because sessions, comments, articles, and
 SSH require the Rust server and its SQLite file.
 
 ## Configure and run the server
@@ -117,9 +120,12 @@ can be sent over `http://127.0.0.1`.
 
 Browser shortcuts (article navigation keys are shared with SSH):
 
-- `Left`/`Right`, `h`/`l`, or `1`–`3`: sections
+- `Left`/`Right`, `h`/`l`, or `1`–`4`: sections
 - `r`: switch language
-- `a`: owner password login
+- `a` outside an article: owner login; `a` inside an article: reader login
+- `s` inside an article: register a reader account
+- `m` inside an article: open comments or write one when signed in
+- `d` inside an article: log out
 - `j`/`k` or arrows: select an article, or scroll the open article
 - `Enter`/`o`: open the selected Markdown article
 - `e`: edit the selected article on GitHub; creates one if the list is empty
@@ -136,6 +142,13 @@ SSH guest:
 
 ```sh
 ssh -p 2222 guest@svetsec.ru
+```
+
+Registered readers can use their username and password and press `m` in an
+open article to write a comment:
+
+```sh
+ssh -p 2222 YourUsername@svetsec.ru
 ```
 
 SSH owner (the key must match `SVETSEC_OWNER_PUBLIC_KEY_FILE`):
@@ -191,10 +204,14 @@ fine-grained token with read-only Contents permission.
 ## API and data model
 
 The server creates the SQLite schema automatically. It contains
-`web_sessions`, `presence`, and `articles` tables and enables WAL mode.
+`web_sessions`, `users`, `user_sessions`, `comments`, and `articles` tables and
+enables WAL mode. Existing databases are migrated without deleting the former
+presence table, but that table is no longer read or updated.
 
 - `GET/POST/DELETE /api/session`: state, login, logout
-- `POST /api/heartbeat`: refresh owner presence
+- `POST /api/users`: register and start a reader session
+- `POST /api/users/session`: log into a reader session
+- `GET/POST /api/articles/:slug/comments`: list or add article comments
 - `GET /api/articles`: published articles for guests, drafts included for owner
 - `POST /api/articles`: create/update by slug; owner session required
 - `GET /resume`: serve the generated PDF at the short public URL
@@ -266,7 +283,7 @@ authenticated owner session. Use the SSH endpoint for key-backed owner access.
 crates/app-core      shared state, localization, and messages
 crates/app-ui        shared Ratatui rendering and hit-testing
 crates/app-terminal  native local Crossterm loop
-crates/app-web       Ratzilla/WebAssembly adapter and API polling
-crates/app-server    Axum HTTP, SQLite, SSH, presence, and owner editor
+crates/app-web       Ratzilla/WebAssembly adapter and browser interactions
+crates/app-server    Axum HTTP, SQLite, SSH, accounts, comments, and owner editor
 resume               Typst source for the PDF linked from Info
 ```

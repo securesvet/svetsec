@@ -187,42 +187,50 @@ pub enum HelpTarget {
     CodeRun(usize),
     CodeCopy(usize),
     PythonOutputClose,
+    CommentLogin,
+    CommentRegister,
+    CommentAdd,
+    CommentLogout,
 }
 
 impl HelpTarget {
     #[must_use]
-    pub const fn text(self, language: Language, owner_online: bool) -> &'static str {
-        match (self, language, owner_online) {
-            (Self::Logo, Language::En, true) => "Green means the site owner is here now.",
-            (Self::Logo, Language::En, false) => "The dot turns green when the site owner is here.",
-            (Self::Logo, Language::Ru, true) => "Зелёная точка: владелец сайта сейчас здесь.",
-            (Self::Logo, Language::Ru, false) => {
-                "Точка станет зелёной, когда владелец будет на сайте."
-            }
-            (Self::Tab(_), Language::En, _) => "Open this section.",
-            (Self::Tab(_), Language::Ru, _) => "Открыть этот раздел.",
-            (Self::Language(Language::En), Language::En, _) => "Switch to English.",
-            (Self::Language(Language::Ru), Language::En, _) => "Switch to Russian.",
-            (Self::Language(Language::En), Language::Ru, _) => "Переключить на английский.",
-            (Self::Language(Language::Ru), Language::Ru, _) => "Переключить на русский.",
-            (Self::Status, Language::En, _) => "Live session and connection state.",
-            (Self::Status, Language::Ru, _) => "Состояние сессии и подключения.",
-            (Self::Articles, Language::En, _) => "Owner-only article workspace.",
-            (Self::Articles, Language::Ru, _) => "Редактор статей, доступный только владельцу.",
-            (Self::Article(_), Language::En, _) => "Open this article.",
-            (Self::Article(_), Language::Ru, _) => "Открыть эту статью.",
-            (Self::ArticleBack, Language::En, _) => "Back to all articles.",
-            (Self::ArticleBack, Language::Ru, _) => "Вернуться к списку статей.",
-            (Self::Project(_), Language::En, _) => "Open this project.",
-            (Self::Project(_), Language::Ru, _) => "Открыть этот проект.",
-            (Self::Resume, Language::En, _) => "Open the PDF resume.",
-            (Self::Resume, Language::Ru, _) => "Открыть резюме в PDF.",
-            (Self::CodeRun(_), Language::En, _) => "Run this Python block.",
-            (Self::CodeRun(_), Language::Ru, _) => "Запустить этот Python-блок.",
-            (Self::CodeCopy(_), Language::En, _) => "Copy this code block.",
-            (Self::CodeCopy(_), Language::Ru, _) => "Скопировать этот блок кода.",
-            (Self::PythonOutputClose, Language::En, _) => "Close Python output.",
-            (Self::PythonOutputClose, Language::Ru, _) => "Закрыть вывод Python.",
+    pub const fn text(self, language: Language) -> &'static str {
+        match (self, language) {
+            (Self::Logo, Language::En) => "svetsec.ru home and site identity.",
+            (Self::Logo, Language::Ru) => "Главная и идентификатор сайта svetsec.ru.",
+            (Self::Tab(_), Language::En) => "Open this section.",
+            (Self::Tab(_), Language::Ru) => "Открыть этот раздел.",
+            (Self::Language(Language::En), Language::En) => "Switch to English.",
+            (Self::Language(Language::Ru), Language::En) => "Switch to Russian.",
+            (Self::Language(Language::En), Language::Ru) => "Переключить на английский.",
+            (Self::Language(Language::Ru), Language::Ru) => "Переключить на русский.",
+            (Self::Status, Language::En) => "Authentication and access state.",
+            (Self::Status, Language::Ru) => "Состояние авторизации и доступа.",
+            (Self::Articles, Language::En) => "Owner-only article workspace.",
+            (Self::Articles, Language::Ru) => "Редактор статей, доступный только владельцу.",
+            (Self::Article(_), Language::En) => "Open this article.",
+            (Self::Article(_), Language::Ru) => "Открыть эту статью.",
+            (Self::ArticleBack, Language::En) => "Back to all articles.",
+            (Self::ArticleBack, Language::Ru) => "Вернуться к списку статей.",
+            (Self::Project(_), Language::En) => "Open this project.",
+            (Self::Project(_), Language::Ru) => "Открыть этот проект.",
+            (Self::Resume, Language::En) => "Open the PDF resume.",
+            (Self::Resume, Language::Ru) => "Открыть резюме в PDF.",
+            (Self::CodeRun(_), Language::En) => "Run this Python block.",
+            (Self::CodeRun(_), Language::Ru) => "Запустить этот Python-блок.",
+            (Self::CodeCopy(_), Language::En) => "Copy this code block.",
+            (Self::CodeCopy(_), Language::Ru) => "Скопировать этот блок кода.",
+            (Self::PythonOutputClose, Language::En) => "Close Python output.",
+            (Self::PythonOutputClose, Language::Ru) => "Закрыть вывод Python.",
+            (Self::CommentLogin, Language::En) => "Sign in to your reader account.",
+            (Self::CommentLogin, Language::Ru) => "Войти в аккаунт читателя.",
+            (Self::CommentRegister, Language::En) => "Create a reader account.",
+            (Self::CommentRegister, Language::Ru) => "Создать аккаунт читателя.",
+            (Self::CommentAdd, Language::En) => "Leave a comment on this article.",
+            (Self::CommentAdd, Language::Ru) => "Оставить комментарий к статье.",
+            (Self::CommentLogout, Language::En) => "Sign out of this account.",
+            (Self::CommentLogout, Language::Ru) => "Выйти из этого аккаунта.",
         }
     }
 }
@@ -234,7 +242,6 @@ pub enum Message {
     SelectTab(Tab),
     SelectLanguage(Language),
     ToggleLanguage,
-    SetOwnerOnline(bool),
     SetAuthenticated(bool),
     Hover(Option<HelpTarget>),
     HideLanguageNotice(u64),
@@ -304,6 +311,15 @@ pub struct ArticleContent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Comment {
+    pub id: i64,
+    pub author: String,
+    pub owner: bool,
+    pub body: String,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarkdownCodeBlock {
     pub index: usize,
     pub language: String,
@@ -359,8 +375,11 @@ impl ArticleSummary {
 pub struct App {
     selected: Tab,
     language: Language,
-    owner_online: bool,
     authenticated: bool,
+    username: Option<String>,
+    comments: Vec<Comment>,
+    comments_loading: bool,
+    comments_error: Option<String>,
     articles: Vec<ArticleSummary>,
     articles_loaded: bool,
     articles_loading: bool,
@@ -406,13 +425,53 @@ impl App {
     }
 
     #[must_use]
-    pub const fn owner_online(&self) -> bool {
-        self.owner_online
+    pub const fn authenticated(&self) -> bool {
+        self.authenticated
     }
 
     #[must_use]
-    pub const fn authenticated(&self) -> bool {
-        self.authenticated
+    pub fn username(&self) -> Option<&str> {
+        self.username.as_deref()
+    }
+
+    #[must_use]
+    pub fn signed_in(&self) -> bool {
+        self.authenticated || self.username.is_some()
+    }
+
+    pub fn set_user(&mut self, username: Option<String>) {
+        self.username = username;
+    }
+
+    #[must_use]
+    pub fn comments(&self) -> &[Comment] {
+        &self.comments
+    }
+
+    #[must_use]
+    pub const fn comments_loading(&self) -> bool {
+        self.comments_loading
+    }
+
+    #[must_use]
+    pub fn comments_error(&self) -> Option<&str> {
+        self.comments_error.as_deref()
+    }
+
+    pub fn begin_comments_load(&mut self) {
+        self.comments_loading = true;
+        self.comments_error = None;
+    }
+
+    pub fn set_comments(&mut self, comments: Vec<Comment>) {
+        self.comments = comments;
+        self.comments_loading = false;
+        self.comments_error = None;
+    }
+
+    pub fn set_comments_error(&mut self, error: impl Into<String>) {
+        self.comments_loading = false;
+        self.comments_error = Some(error.into());
     }
 
     #[must_use]
@@ -650,6 +709,8 @@ impl App {
         self.python_running = false;
         self.python_output = None;
         self.article_animation_phase = 0;
+        self.comments.clear();
+        self.begin_comments_load();
         self.article_cursor = self
             .article_navigation()
             .map_or(0, |layout| layout.cursor_start);
@@ -712,7 +773,6 @@ impl App {
                 self.language = self.language.next();
                 self.show_language_notice();
             }
-            Message::SetOwnerOnline(online) => self.owner_online = online,
             Message::SetAuthenticated(authenticated) => self.authenticated = authenticated,
             Message::Hover(target) => self.hovered = target,
             Message::HideLanguageNotice(generation) => {
@@ -788,6 +848,9 @@ impl App {
                 self.python_running = false;
                 self.python_output = None;
                 self.awaiting_article_g = false;
+                self.comments.clear();
+                self.comments_loading = false;
+                self.comments_error = None;
                 self.article_animation_phase = 0;
             }
             Message::AdvanceSkeleton => {
@@ -1161,8 +1224,8 @@ fn markdown_display_text(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        App, ArticleContent, ArticleSummary, DOT_WELL_ROWS, Effect, HelpTarget, Language, Message,
-        PROJECTS, SITE_URL, Tab, markdown_code_blocks, python_code_blocks,
+        App, ArticleContent, ArticleSummary, Comment, DOT_WELL_ROWS, Effect, HelpTarget, Language,
+        Message, PROJECTS, SITE_URL, Tab, markdown_code_blocks, python_code_blocks,
     };
 
     #[test]
@@ -1175,20 +1238,45 @@ mod tests {
     }
 
     #[test]
-    fn language_presence_and_help_are_shared_state() {
+    fn language_authentication_and_help_are_shared_state() {
         let mut app = App::default();
         let _ = app.update(Message::SelectLanguage(Language::Ru));
-        let _ = app.update(Message::SetOwnerOnline(true));
         let _ = app.update(Message::SetAuthenticated(true));
         let _ = app.update(Message::Hover(Some(HelpTarget::Logo)));
         assert_eq!(app.language(), Language::Ru);
-        assert!(app.owner_online());
         assert!(app.authenticated());
         assert_eq!(app.hovered(), Some(HelpTarget::Logo));
         assert!(app.language_notice());
         let generation = app.language_notice_generation();
         let _ = app.update(Message::HideLanguageNotice(generation));
         assert!(!app.language_notice());
+    }
+
+    #[test]
+    fn reader_identity_and_article_comments_have_explicit_loading_state() {
+        let mut app = App::default();
+        app.set_user(Some("reader".into()));
+        assert!(app.signed_in());
+        assert!(!app.authenticated());
+        app.set_opened_article(ArticleContent {
+            slug: "hello".into(),
+            title: "Hello".into(),
+            markdown: "Text".into(),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        assert!(app.comments_loading());
+        app.set_comments(vec![Comment {
+            id: 1,
+            author: "reader".into(),
+            owner: false,
+            body: "Nice article".into(),
+            created_at: 1,
+        }]);
+        assert_eq!(app.comments()[0].body, "Nice article");
+        assert!(!app.comments_loading());
+        let _ = app.update(Message::CloseArticle);
+        assert!(app.comments().is_empty());
     }
 
     #[test]

@@ -24,7 +24,6 @@ const BODY: Color = Color::Rgb(54, 58, 61);
 const MUTED: Color = Color::Rgb(105, 109, 112);
 const CONTROL: Color = Color::Rgb(76, 117, 152);
 const CONTROL_ACTIVE: Color = Color::Rgb(49, 93, 130);
-const ONLINE_GREEN: Color = Color::Rgb(18, 145, 79);
 const LINK_BLUE: Color = Color::Rgb(28, 100, 159);
 const CODE_KEYWORD: Color = Color::Rgb(102, 53, 158);
 const CODE_STRING: Color = Color::Rgb(20, 110, 100);
@@ -103,6 +102,14 @@ pub struct ArticleImagePlacement<'a> {
 pub enum CodeBlockAction {
     Run { block: usize, row: u16 },
     Copy { block: usize, row: u16 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommentAction {
+    Login,
+    Register,
+    Add,
+    Logout,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -606,6 +613,14 @@ pub fn help_target_at(area: Rect, column: u16, row: u16, app: &App) -> Option<He
     if python_output_close_area(area, app).is_some_and(|area| area.contains(position)) {
         return Some(HelpTarget::PythonOutputClose);
     }
+    if let Some(action) = comment_action_at(area, column, row, app) {
+        return Some(match action {
+            CommentAction::Login => HelpTarget::CommentLogin,
+            CommentAction::Register => HelpTarget::CommentRegister,
+            CommentAction::Add => HelpTarget::CommentAdd,
+            CommentAction::Logout => HelpTarget::CommentLogout,
+        });
+    }
     if let Some(action) = code_action_at(area, column, row, app) {
         return Some(match action {
             CodeBlockAction::Run { block, .. } => HelpTarget::CodeRun(block),
@@ -680,6 +695,52 @@ pub fn python_output_close_area(area: Rect, app: &App) -> Option<Rect> {
             1,
         )
     })
+}
+
+#[must_use]
+pub fn comment_action_areas(area: Rect, app: &App) -> Vec<(CommentAction, Rect)> {
+    if app.selected() != Tab::Articles
+        || app.opened_article().is_none()
+        || app.python_running()
+        || app.python_output().is_some()
+    {
+        return Vec::new();
+    }
+    let content = layout(area).content;
+    if content.width < 76 {
+        return Vec::new();
+    }
+    let panel = Layout::horizontal([
+        Constraint::Percentage(68),
+        Constraint::Length(1),
+        Constraint::Percentage(32),
+    ])
+    .split(content)[2];
+    let actions = if app.signed_in() {
+        [(CommentAction::Add, 11_u16), (CommentAction::Logout, 10)]
+    } else {
+        [(CommentAction::Login, 9_u16), (CommentAction::Register, 12)]
+    };
+    let left = panel.left().saturating_add(2);
+    let y = panel.bottom().saturating_sub(3);
+    let gap = 1;
+    let available = panel.right().saturating_sub(2).saturating_sub(left);
+    let first_width = actions[0].1.min(available);
+    let second_left = left.saturating_add(first_width + gap);
+    let second_width = actions[1]
+        .1
+        .min(panel.right().saturating_sub(2).saturating_sub(second_left));
+    vec![
+        (actions[0].0, Rect::new(left, y, first_width, 1)),
+        (actions[1].0, Rect::new(second_left, y, second_width, 1)),
+    ]
+}
+
+#[must_use]
+pub fn comment_action_at(area: Rect, column: u16, row: u16, app: &App) -> Option<CommentAction> {
+    comment_action_areas(area, app)
+        .into_iter()
+        .find_map(|(action, area)| area.contains((column, row).into()).then_some(action))
 }
 
 #[must_use]
@@ -816,14 +877,7 @@ fn render_header(frame: &mut Frame<'_>, layout: &UiLayout, app: &App) {
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                "● ",
-                Style::new().fg(if app.owner_online() {
-                    ONLINE_GREEN
-                } else {
-                    MID_GRAY
-                }),
-            ),
+            Span::styled("● ", Style::new().fg(MID_GRAY)),
             Span::styled(
                 "svetsec.ru",
                 Style::new().fg(INK).add_modifier(Modifier::BOLD),
@@ -919,6 +973,8 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &App) {
         render_primary_panel(frame, columns[0], app, false);
         if show_python_output {
             render_python_output_panel(frame, columns[2], app);
+        } else if app.selected() == Tab::Articles && app.opened_article().is_some() {
+            render_comments_panel(frame, columns[2], app);
         } else {
             render_status_panel(frame, columns[2], app);
         }
@@ -950,7 +1006,7 @@ fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: b
 
     let mut content = vec![
         Line::from(vec![
-            Span::styled("● ONLINE", Style::new().fg(INK).bold()),
+            Span::styled("● SVETSEC", Style::new().fg(INK).bold()),
             Span::styled("  //  RUST + WASM", Style::new().fg(MUTED)),
         ]),
         Line::default(),
@@ -2018,21 +2074,15 @@ fn render_status_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Language::En => ("SESSION", "owner", "visitor", "editor"),
         Language::Ru => ("СЕССИЯ", "владелец", "гость", "редактор"),
     };
+    let identity = if app.authenticated() {
+        owner
+    } else {
+        app.username().unwrap_or(visitor)
+    };
     let status = Text::from(vec![
         Line::from(Span::styled(session, Style::new().fg(MUTED).bold())),
         Line::default(),
-        metric_line(
-            "identity",
-            if app.authenticated() { owner } else { visitor },
-        ),
-        metric_line(
-            "presence",
-            if app.owner_online() {
-                "online"
-            } else {
-                "offline"
-            },
-        ),
+        metric_line("identity", identity),
         metric_line(
             "write",
             if app.authenticated() {
@@ -2041,9 +2091,10 @@ fn render_status_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 "locked"
             },
         ),
-        Line::default(),
-        Line::from(Span::styled("CPU  ▂▃▅▇▆▄", Style::new().fg(INK))),
-        Line::from(Span::styled("NET  ▁▂▄▆█▅", Style::new().fg(GRAPHITE))),
+        metric_line(
+            "comments",
+            if app.signed_in() { "enabled" } else { "login" },
+        ),
     ]);
 
     frame.render_widget(
@@ -2051,9 +2102,119 @@ fn render_status_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Block::new()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .title(Line::from(" telemetry ").fg(GRAPHITE))
+                .title(Line::from(" access ").fg(GRAPHITE))
                 .padding(Padding::new(1, 1, 1, 1)),
         ),
+        area,
+    );
+    paint_gradient_border(frame.buffer_mut(), area, GRAPHITE, MID_GRAY);
+}
+
+fn render_comments_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    frame.render_widget(Block::new().style(Style::new().bg(PANEL_ALT)), area);
+    let content_bottom = area.bottom().saturating_sub(4);
+    let content_area = Rect::new(
+        area.left().saturating_add(2),
+        area.top().saturating_add(2),
+        area.width.saturating_sub(4),
+        content_bottom.saturating_sub(area.top().saturating_add(2)),
+    );
+    let mut lines = Vec::new();
+    if app.comments_loading() {
+        lines.push(Line::from(Span::styled(
+            match app.language() {
+                Language::En => "Loading comments…",
+                Language::Ru => "Загрузка комментариев…",
+            },
+            Style::new().fg(MUTED),
+        )));
+    } else if let Some(error) = app.comments_error() {
+        lines.push(Line::from(Span::styled(
+            error.to_owned(),
+            Style::new().fg(CODE_NUMBER),
+        )));
+    } else if app.comments().is_empty() {
+        lines.push(Line::from(Span::styled(
+            match app.language() {
+                Language::En => "No comments yet.",
+                Language::Ru => "Комментариев пока нет.",
+            },
+            Style::new().fg(MUTED),
+        )));
+    } else {
+        for comment in app.comments() {
+            let author_style = if comment.owner {
+                Style::new().fg(CONTROL_ACTIVE).bold()
+            } else {
+                Style::new().fg(INK).bold()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("@{}", comment.author),
+                author_style,
+            )));
+            lines.extend(
+                comment
+                    .body
+                    .lines()
+                    .map(|line| Line::from(Span::styled(line.to_owned(), Style::new().fg(BODY)))),
+            );
+            lines.push(Line::default());
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(Style::new().bg(PANEL_ALT))
+            .wrap(Wrap { trim: false }),
+        content_area,
+    );
+    for (action, action_area) in comment_action_areas(frame.area(), app) {
+        let (label, target) = match (action, app.language()) {
+            (CommentAction::Login, Language::En) => (" LOGIN ", HelpTarget::CommentLogin),
+            (CommentAction::Login, Language::Ru) => (" ВОЙТИ ", HelpTarget::CommentLogin),
+            (CommentAction::Register, Language::En) => (" REGISTER ", HelpTarget::CommentRegister),
+            (CommentAction::Register, Language::Ru) => (" РЕГИСТР. ", HelpTarget::CommentRegister),
+            (CommentAction::Add, Language::En) => (" COMMENT ", HelpTarget::CommentAdd),
+            (CommentAction::Add, Language::Ru) => (" НАПИСАТЬ ", HelpTarget::CommentAdd),
+            (CommentAction::Logout, Language::En) => (" LOGOUT ", HelpTarget::CommentLogout),
+            (CommentAction::Logout, Language::Ru) => (" ВЫЙТИ ", HelpTarget::CommentLogout),
+        };
+        let hovered = app.hovered() == Some(target);
+        frame.render_widget(
+            Paragraph::new(label)
+                .style(if hovered {
+                    Style::new().fg(WHITE).bg(CONTROL_ACTIVE).bold()
+                } else {
+                    Style::new().fg(WHITE).bg(CONTROL).bold()
+                })
+                .alignment(Alignment::Center),
+            action_area,
+        );
+    }
+    let identity = if app.authenticated() {
+        "@svetsec"
+    } else {
+        app.username().unwrap_or("guest")
+    };
+    frame.render_widget(
+        Paragraph::new(identity)
+            .style(Style::new().fg(MUTED))
+            .alignment(Alignment::Right),
+        Rect::new(
+            area.left().saturating_add(2),
+            area.bottom().saturating_sub(2),
+            area.width.saturating_sub(4),
+            1,
+        ),
+    );
+    frame.render_widget(
+        Block::new()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(Line::from(match app.language() {
+                Language::En => " comments ",
+                Language::Ru => " комментарии ",
+            }))
+            .style(Style::new().fg(GRAPHITE)),
         area,
     );
     paint_gradient_border(frame.buffer_mut(), area, GRAPHITE, MID_GRAY);
@@ -2140,7 +2301,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(if app.opened_article().is_some() {
-                    "READ  •  j/k scroll  •  Esc back"
+                    "READ  •  j/k scroll  •  m comment  •  Esc back"
                 } else if app.selected() == Tab::Projects {
                     "PROJECTS  •  j/k select  •  Enter open"
                 } else {
@@ -2164,6 +2325,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         Line::from(vec![
             Span::styled(" READ ", Style::new().fg(WHITE).bg(CONTROL_ACTIVE).bold()),
             Span::styled(" j/k or ↑/↓ scroll   ", Style::new().fg(BODY)),
+            Span::styled(" COMMENT ", Style::new().fg(WHITE).bg(CONTROL).bold()),
+            Span::styled(" m   ", Style::new().fg(BODY)),
             Span::styled(" BACK ", Style::new().fg(WHITE).bg(CONTROL).bold()),
             Span::styled(" Esc ", Style::new().fg(BODY)),
         ])
@@ -2211,10 +2374,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     );
 
     if let Some(target) = app.hovered() {
-        let help = single_line(
-            target.text(app.language(), app.owner_online()),
-            rows[1].width.min(56) as usize,
-        );
+        let help = single_line(target.text(app.language()), rows[1].width.min(56) as usize);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(help, Style::new().fg(BODY))))
                 .alignment(Alignment::Right),
@@ -2238,7 +2398,7 @@ fn single_line(text: &str, max_chars: usize) -> String {
         .collect()
 }
 
-fn metric_line(label: &'static str, value: &'static str) -> Line<'static> {
+fn metric_line<'a>(label: &'a str, value: &'a str) -> Line<'a> {
     Line::from(vec![
         Span::styled(format!("{label:<8}"), Style::new().fg(MUTED)),
         Span::styled(value, Style::new().fg(BODY)),
@@ -2361,14 +2521,17 @@ fn interpolate(start: Color, end: Color, position: u16, denominator: u16) -> Col
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
-    use svetsec_core::{App, ArticleContent, ArticleImage, ArticleSummary, Language, Message, Tab};
+    use svetsec_core::{
+        App, ArticleContent, ArticleImage, ArticleSummary, Comment, Language, Message, Tab,
+    };
 
     use super::{
-        CodeBlockAction, article_at, article_back_area, article_cursor_at, article_viewport_rows,
-        code_action_areas, code_action_at, help_target_at, label_color, layout,
-        markdown_image_offsets, markdown_lines, markdown_lines_with_focus, native_image_placements,
-        project_areas, project_at, python_output_area, python_output_close_area, render,
-        resume_link_area, single_line, tab_at,
+        CodeBlockAction, CommentAction, article_at, article_back_area, article_cursor_at,
+        article_viewport_rows, code_action_areas, code_action_at, comment_action_areas,
+        comment_action_at, help_target_at, label_color, layout, markdown_image_offsets,
+        markdown_lines, markdown_lines_with_focus, native_image_placements, project_areas,
+        project_at, python_output_area, python_output_close_area, render, resume_link_area,
+        single_line, tab_at,
     };
 
     #[test]
@@ -2955,7 +3118,7 @@ mod tests {
     }
 
     #[test]
-    fn finished_python_output_replaces_telemetry_and_has_a_close_target() {
+    fn finished_python_output_replaces_comments_and_has_a_close_target() {
         let area = Rect::new(0, 0, 100, 30);
         let mut app = App::default();
         let _ = app.update(Message::SelectTab(Tab::Articles));
@@ -2976,6 +3139,63 @@ mod tests {
             help_target_at(area, close.left(), close.top(), &app),
             Some(svetsec_core::HelpTarget::PythonOutputClose)
         );
+    }
+
+    #[test]
+    fn opened_article_renders_comments_and_account_actions_on_the_right() {
+        let area = Rect::new(0, 0, 100, 30);
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "hello".into(),
+            title: "Hello".into(),
+            markdown: "Text".into(),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        app.set_comments(vec![Comment {
+            id: 1,
+            author: "reader".into(),
+            owner: false,
+            body: "Useful note".into(),
+            created_at: 1,
+        }]);
+
+        let guest_actions = comment_action_areas(area, &app);
+        assert_eq!(
+            guest_actions
+                .iter()
+                .map(|(action, _)| *action)
+                .collect::<Vec<_>>(),
+            [CommentAction::Login, CommentAction::Register]
+        );
+        let login = guest_actions[0].1;
+        assert_eq!(
+            comment_action_at(area, login.left(), login.top(), &app),
+            Some(CommentAction::Login)
+        );
+
+        app.set_user(Some("reader".into()));
+        assert_eq!(
+            comment_action_areas(area, &app)
+                .iter()
+                .map(|(action, _)| *action)
+                .collect::<Vec<_>>(),
+            [CommentAction::Add, CommentAction::Logout]
+        );
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut rendered = String::new();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                rendered.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(rendered.contains("comments"));
+        assert!(rendered.contains("@reader"));
+        assert!(rendered.contains("Useful note"));
     }
 
     #[test]

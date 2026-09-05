@@ -7,13 +7,14 @@ use std::{
 };
 
 use anyhow::Result;
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Text},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use russh::{
@@ -22,11 +23,11 @@ use russh::{
     server::{Auth, ChannelOpenHandle, Config, Handle, Handler, Msg, Server, Session},
 };
 use svetsec_core::{
-    App, ArticleContent, ArticleImage, ArticleSummary, HelpTarget, Language, Message, Tab,
+    App, ArticleContent, ArticleImage, ArticleSummary, Comment, HelpTarget, Language, Message, Tab,
 };
 use tokio::sync::{Mutex, mpsc::UnboundedSender, mpsc::unbounded_channel};
 
-use crate::db::{ArticleInput, Database};
+use crate::db::{ArticleInput, CommentAuthor, CreateCommentError, Database, User};
 use crate::github::{GithubSource, valid_date};
 use crate::python::PyodideRunner;
 
@@ -71,7 +72,9 @@ struct Client {
     terminal: SshTerminal,
     app: App,
     editor: Option<VimEditor>,
+    comment_editor: Option<CommentEditor>,
     owner: bool,
+    user: Option<User>,
 }
 
 #[derive(Clone)]
@@ -85,6 +88,7 @@ struct SshServer {
     pyodide: PyodideRunner,
     id: usize,
     authenticated_owner: bool,
+    authenticated_user: Option<User>,
 }
 
 pub async fn serve(
@@ -119,6 +123,7 @@ pub async fn serve(
         pyodide,
         id: 0,
         authenticated_owner: false,
+        authenticated_user: None,
     };
     server.start_render_loop();
     let config = Config {
@@ -137,27 +142,13 @@ pub async fn serve(
 impl SshServer {
     fn start_render_loop(&self) {
         let clients = Arc::clone(&self.clients);
-        let database = self.database.clone();
         tokio::spawn(async move {
-            let mut online = false;
-            let mut next_refresh = tokio::time::Instant::now();
             let mut advance_skeleton = false;
             loop {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 advance_skeleton = !advance_skeleton;
-                let refresh = tokio::time::Instant::now() >= next_refresh;
-                if refresh {
-                    online = database.owner_online().unwrap_or(false);
-                    next_refresh = tokio::time::Instant::now() + Duration::from_secs(2);
-                }
                 let mut clients = clients.lock().await;
-                for (id, client) in clients.iter_mut() {
-                    if refresh && client.owner {
-                        let _ = database.touch_presence(&format!("ssh:{id}"), "ssh");
-                    }
-                    let _ = client
-                        .app
-                        .update(Message::SetOwnerOnline(online || client.owner));
+                for client in clients.values_mut() {
                     if advance_skeleton
                         && (client.app.articles_loading() || client.app.article_loading())
                     {
@@ -170,6 +161,7 @@ impl SshServer {
                         terminal,
                         app,
                         editor,
+                        comment_editor,
                         ..
                     } = client;
                     let _ = terminal.draw(|frame| {
@@ -180,15 +172,14 @@ impl SshServer {
                                 frame.area(),
                             ));
                             svetsec_ui::render(frame, app);
+                            if let Some(editor) = comment_editor {
+                                render_comment_editor(frame, editor, app.language());
+                            }
                         }
                     });
                 }
             }
         });
-    }
-
-    fn presence_id(&self) -> String {
-        format!("ssh:{}", self.id)
     }
 }
 
@@ -207,11 +198,40 @@ impl Handler for SshServer {
 
     async fn auth_none(&mut self, user: &str) -> Result<Auth, Self::Error> {
         self.authenticated_owner = false;
-        Ok(if user == self.owner_user.as_ref() {
+        self.authenticated_user = None;
+        let registered = self.database.user_credentials(user)?.is_some();
+        Ok(if user == self.owner_user.as_ref() || registered {
             Auth::reject()
         } else {
             Auth::Accept
         })
+    }
+
+    async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+        self.authenticated_owner = false;
+        self.authenticated_user = None;
+        if user == self.owner_user.as_ref() {
+            return Ok(Auth::reject());
+        }
+        let Some(credentials) = self.database.user_credentials(user)? else {
+            return Ok(Auth::reject());
+        };
+        let password = password.to_owned();
+        let password_hash = credentials.password_hash;
+        let valid = tokio::task::spawn_blocking(move || {
+            PasswordHash::new(&password_hash).ok().is_some_and(|hash| {
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &hash)
+                    .is_ok()
+            })
+        })
+        .await?;
+        if valid {
+            self.authenticated_user = Some(credentials.user);
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::reject())
+        }
     }
 
     async fn auth_publickey(
@@ -222,18 +242,12 @@ impl Handler for SshServer {
         let is_owner =
             user == self.owner_user.as_ref() && public_key.key_data() == self.owner_key.key_data();
         self.authenticated_owner = is_owner;
+        self.authenticated_user = None;
         Ok(if is_owner {
             Auth::Accept
         } else {
             Auth::reject()
         })
-    }
-
-    async fn auth_succeeded(&mut self, _: &mut Session) -> Result<(), Self::Error> {
-        if self.authenticated_owner {
-            self.database.touch_presence(&self.presence_id(), "ssh")?;
-        }
-        Ok(())
     }
 
     async fn channel_open_session(
@@ -252,16 +266,20 @@ impl Handler for SshServer {
         let mut app = App::default();
         app.set_profile_image((*self.profile_image).clone());
         let _ = app.update(Message::SetAuthenticated(self.authenticated_owner));
-        let _ = app.update(Message::SetOwnerOnline(
-            self.database.owner_online()? || self.authenticated_owner,
-        ));
+        app.set_user(
+            self.authenticated_user
+                .as_ref()
+                .map(|user| user.username.clone()),
+        );
         self.clients.lock().await.insert(
             self.id,
             Client {
                 terminal,
                 app,
                 editor: None,
+                comment_editor: None,
                 owner: self.authenticated_owner,
+                user: self.authenticated_user.clone(),
             },
         );
         reply.accept().await;
@@ -296,9 +314,49 @@ impl Handler for SshServer {
             return Ok(());
         }
 
+        if let Some(editor) = &mut client.comment_editor {
+            match editor.input(data) {
+                CommentEditorOutcome::Continue => {}
+                CommentEditorOutcome::Cancel => client.comment_editor = None,
+                CommentEditorOutcome::Submit(body) => {
+                    let slug = client
+                        .app
+                        .opened_article()
+                        .map(|article| article.slug.clone());
+                    let author = if client.owner {
+                        Some(CommentAuthor::Owner)
+                    } else {
+                        client
+                            .user
+                            .as_ref()
+                            .map(|user| CommentAuthor::User(user.id))
+                    };
+                    client.comment_editor = None;
+                    if let (Some(slug), Some(author)) = (slug, author) {
+                        match self.database.create_comment(&slug, author, body.trim()) {
+                            Ok(_) => match self.database.list_comments(&slug) {
+                                Ok(comments) => client
+                                    .app
+                                    .set_comments(comments.into_iter().map(core_comment).collect()),
+                                Err(_) => {
+                                    client.app.set_comments_error("Could not reload comments.")
+                                }
+                            },
+                            Err(CreateCommentError::RateLimited) => client
+                                .app
+                                .set_comments_error("Wait 10 seconds before commenting again."),
+                            Err(CreateCommentError::Database(_)) => {
+                                client.app.set_comments_error("Could not save comment.")
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+
         if data == b"q" || data == "й".as_bytes() || data == b"\x03" {
             clients.remove(&self.id);
-            self.database.remove_presence(&self.presence_id())?;
             session.close(channel)?;
             return Ok(());
         }
@@ -327,6 +385,16 @@ impl Handler for SshServer {
             {
                 let clipboard = format!("\x1b]52;c;{}\x07", STANDARD.encode(block.code));
                 session.data(channel, clipboard.into_bytes())?;
+                return Ok(());
+            }
+            if article_open && (data == b"m" || data == "ь".as_bytes()) {
+                if client.owner || client.user.is_some() {
+                    client.comment_editor = Some(CommentEditor::default());
+                } else {
+                    client.app.set_comments_error(
+                        "Register on svetsec.ru, then reconnect with your username and password.",
+                    );
+                }
                 return Ok(());
             }
             let run_key = article_open && (data == b"p" || data == "з".as_bytes());
@@ -529,6 +597,7 @@ impl SshServer {
 
     fn load_github_article(&self, slug: String) {
         let github = self.github.clone();
+        let database = self.database.clone();
         let clients = Arc::clone(&self.clients);
         let id = self.id;
         tokio::spawn(async move {
@@ -538,25 +607,34 @@ impl SshServer {
                 .get(&id)
                 .map_or(Language::default(), |client| client.app.language());
             let result = github.article(&slug, language).await;
+            let comments = database.list_comments(&slug);
             if let Some(client) = clients.lock().await.get_mut(&id) {
                 match result {
-                    Ok(article) => client.app.set_opened_article(ArticleContent {
-                        slug: article.slug,
-                        title: article.title,
-                        markdown: article.markdown,
-                        images: article
-                            .images
-                            .into_iter()
-                            .map(|image| ArticleImage {
-                                source: image.source,
-                                alt: image.alt,
-                                width: image.width,
-                                height: image.height,
-                                pixels: image.pixels,
-                            })
-                            .collect(),
-                        labels: article.labels,
-                    }),
+                    Ok(article) => {
+                        client.app.set_opened_article(ArticleContent {
+                            slug: article.slug,
+                            title: article.title,
+                            markdown: article.markdown,
+                            images: article
+                                .images
+                                .into_iter()
+                                .map(|image| ArticleImage {
+                                    source: image.source,
+                                    alt: image.alt,
+                                    width: image.width,
+                                    height: image.height,
+                                    pixels: image.pixels,
+                                })
+                                .collect(),
+                            labels: article.labels,
+                        });
+                        match comments {
+                            Ok(comments) => client
+                                .app
+                                .set_comments(comments.into_iter().map(core_comment).collect()),
+                            Err(_) => client.app.set_comments_error("Could not load comments."),
+                        }
+                    }
                     Err(_) => client
                         .app
                         .set_articles_error("Could not load this Markdown file."),
@@ -594,12 +672,80 @@ impl SshServer {
     }
 }
 
-impl Drop for SshServer {
-    fn drop(&mut self) {
-        if self.authenticated_owner {
-            let _ = self.database.remove_presence(&self.presence_id());
-        }
+fn core_comment(comment: crate::db::Comment) -> Comment {
+    Comment {
+        id: comment.id,
+        author: comment.author,
+        owner: comment.owner,
+        body: comment.body,
+        created_at: comment.created_at,
     }
+}
+
+#[derive(Default)]
+struct CommentEditor {
+    body: String,
+}
+
+enum CommentEditorOutcome {
+    Continue,
+    Cancel,
+    Submit(String),
+}
+
+impl CommentEditor {
+    fn input(&mut self, data: &[u8]) -> CommentEditorOutcome {
+        if data == b"\x1b" {
+            return CommentEditorOutcome::Cancel;
+        }
+        if data == b"\r" || data == b"\n" {
+            if self.body.trim().is_empty() {
+                return CommentEditorOutcome::Continue;
+            }
+            return CommentEditorOutcome::Submit(self.body.clone());
+        }
+        if data == b"\x7f" || data == b"\x08" {
+            self.body.pop();
+            return CommentEditorOutcome::Continue;
+        }
+        for character in String::from_utf8_lossy(data).chars() {
+            if !character.is_control() && self.body.chars().count() < 1_000 {
+                self.body.push(character);
+            }
+        }
+        CommentEditorOutcome::Continue
+    }
+}
+
+fn render_comment_editor(
+    frame: &mut ratatui::Frame<'_>,
+    editor: &CommentEditor,
+    language: Language,
+) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(64);
+    let height = area.height.saturating_sub(4).min(9);
+    let popup = Rect::new(
+        area.left() + area.width.saturating_sub(width) / 2,
+        area.top() + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let (title, help) = match language {
+        Language::En => (" comment ", "Enter publish · Esc cancel"),
+        Language::Ru => (" комментарий ", "Enter отправить · Esc отмена"),
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(editor.body.clone()),
+            Line::default(),
+            Line::from(Span::styled(help, Style::new().fg(Color::DarkGray))),
+        ])
+        .block(Block::new().borders(Borders::ALL).title(title))
+        .wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1089,7 +1235,10 @@ fn render_editor(frame: &mut ratatui::Frame<'_>, editor: &VimEditor) {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorMode, EditorOutcome, VimEditor, editor_labels, iso_date_from_unix};
+    use super::{
+        CommentEditor, CommentEditorOutcome, EditorMode, EditorOutcome, VimEditor, editor_labels,
+        iso_date_from_unix,
+    };
     use crate::db::Database;
     use svetsec_core::Language;
 
@@ -1128,5 +1277,22 @@ mod tests {
         assert!(editor_labels("one,two,three,four,five,six,seven").is_err());
         assert_eq!(iso_date_from_unix(0), "1970-01-01");
         assert_eq!(iso_date_from_unix(1_788_134_400), "2026-08-31");
+    }
+
+    #[test]
+    fn ssh_comment_editor_submits_unicode_and_can_cancel() {
+        let mut editor = CommentEditor::default();
+        assert!(matches!(
+            editor.input("Отличная статья".as_bytes()),
+            CommentEditorOutcome::Continue
+        ));
+        assert!(matches!(
+            editor.input(b"\r"),
+            CommentEditorOutcome::Submit(body) if body == "Отличная статья"
+        ));
+        assert!(matches!(
+            CommentEditor::default().input(b"\x1b"),
+            CommentEditorOutcome::Cancel
+        ));
     }
 }

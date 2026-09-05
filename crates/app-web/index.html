@@ -278,6 +278,153 @@
         color: #fff !important;
       }
 
+      .web-comment-action {
+        color: #fff !important;
+        background: #4c7598 !important;
+        cursor: pointer;
+        user-select: none;
+        -webkit-user-select: none;
+        font-weight: 700;
+      }
+
+      .web-comment-action:hover {
+        background: #315d82 !important;
+      }
+
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        display: grid;
+        place-items: center;
+        padding: 20px;
+        background: rgb(24 26 28 / 28%);
+      }
+
+      .modal-overlay[hidden] {
+        display: none;
+      }
+
+      .modal-card {
+        width: min(420px, 100%);
+        border: 1px solid #94989a;
+        border-radius: 18px;
+        padding: 22px;
+        color: #181a1c;
+        background: #fff;
+        box-shadow: 0 18px 60px rgb(24 26 28 / 22%);
+      }
+
+      .modal-card h2 {
+        margin: 0 0 16px;
+        font-size: 18px;
+      }
+
+      .modal-card label {
+        display: grid;
+        gap: 6px;
+        margin-block: 12px;
+        color: #464a4e;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .modal-card input,
+      .modal-card textarea {
+        width: 100%;
+        border: 1px solid #94989a;
+        border-radius: 10px;
+        padding: 11px 12px;
+        color: #181a1c;
+        background: #f8f9fb;
+        font: 14px/1.45 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      .modal-card textarea {
+        min-height: 130px;
+        resize: vertical;
+      }
+
+      .modal-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 16px;
+      }
+
+      .modal-actions button {
+        min-height: 42px;
+        border: 1px solid #94989a;
+        border-radius: 999px;
+        padding: 0 16px;
+        color: #181a1c;
+        background: #f5f6f4;
+        font: 700 13px/1 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        cursor: pointer;
+      }
+
+      .modal-actions button[type="submit"] {
+        border-color: #315d82;
+        color: #fff;
+        background: #315d82;
+      }
+
+      .modal-actions button:hover {
+        filter: brightness(0.94);
+      }
+
+      .reader-login {
+        min-height: 42px;
+        margin-top: 14px;
+        border: 1px solid #315d82;
+        border-radius: 999px;
+        padding: 0 16px;
+        color: #fff;
+        background: #315d82;
+        font: 700 13px/1 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        cursor: pointer;
+      }
+
+      .modal-error {
+        min-height: 1.4em;
+        margin: 12px 0 0;
+        color: #a33b31;
+        font-size: 12px;
+      }
+
+      .comment-list {
+        display: grid;
+        gap: 10px;
+        max-height: min(34vh, 260px);
+        overflow-y: auto;
+        padding-right: 4px;
+      }
+
+      .comment-entry {
+        border-left: 3px solid #d7dadd;
+        padding-left: 10px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .comment-entry strong {
+        display: block;
+        margin-bottom: 3px;
+        color: #315d82;
+      }
+
+      #comment-modal[data-signed-in="false"] .signed-in-only {
+        display: none;
+      }
+
+      #comment-modal[data-signed-in="true"] .reader-login {
+        display: none;
+      }
+
+      #auth-modal[data-mode="owner"] .reader-only {
+        display: none;
+      }
+
       .web-back-link,
       .web-resume-link {
         color: #1c649f !important;
@@ -396,6 +543,7 @@
         <button type="button" data-article-action="back">← Articles</button>
         <button type="button" data-article-action="up" aria-label="Scroll article up">K ↑</button>
         <button type="button" data-article-action="down" aria-label="Scroll article down">J ↓</button>
+        <button type="button" data-article-action="comment">Comment</button>
       </div>
       <nav class="mobile-tab-actions" aria-label="Primary mobile navigation">
         <a href="/" data-mobile-tab="main">Main</a>
@@ -403,6 +551,55 @@
         <a href="/projects" data-mobile-tab="projects">Projects</a>
         <a href="/info" data-mobile-tab="info">Info</a>
       </nav>
+    </div>
+    <div id="auth-modal" class="modal-overlay" data-mode="reader" hidden>
+      <form id="auth-form" class="modal-card" data-action="login">
+        <h2 id="auth-title">Reader account</h2>
+        <label id="auth-username-row" class="reader-only">
+          <span id="auth-username-label">Username</span>
+          <input
+            id="auth-username"
+            name="username"
+            autocomplete="username"
+            minlength="3"
+            maxlength="24"
+          />
+        </label>
+        <label>
+          <span id="auth-password-label">Password</span>
+          <input
+            id="auth-password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            minlength="8"
+            maxlength="128"
+            required
+          />
+        </label>
+        <div class="modal-actions">
+          <button id="auth-login" type="submit" data-auth-action="login">Sign in</button>
+          <button id="auth-register" type="submit" class="reader-only" data-auth-action="register">Register</button>
+          <button id="auth-cancel" type="button" data-modal-close="auth-modal">Cancel</button>
+        </div>
+        <p id="auth-error" class="modal-error" role="alert"></p>
+      </form>
+    </div>
+    <div id="comment-modal" class="modal-overlay" hidden>
+      <form id="comment-form" class="modal-card">
+        <h2 id="comment-title">Comments</h2>
+        <div id="comment-list" class="comment-list"></div>
+        <button id="comment-sign-in" class="reader-login" type="button">Sign in / register</button>
+        <label class="signed-in-only">
+          <span id="comment-message-label">Message</span>
+          <textarea id="comment-body" maxlength="1000" required></textarea>
+        </label>
+        <div class="modal-actions">
+          <button id="comment-publish" class="signed-in-only" type="submit">Publish</button>
+          <button id="comment-cancel" type="button" data-modal-close="comment-modal">Cancel</button>
+        </div>
+        <p id="comment-error" class="modal-error" role="alert"></p>
+      </form>
     </div>
     <main class="semantic-fallback">
       <h1>svetsec.ru</h1>

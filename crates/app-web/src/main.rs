@@ -7,11 +7,14 @@ use std::{
 use gloo_timers::future::TimeoutFuture;
 use ratzilla::{DomBackend, WebRenderer, event::KeyCode, ratatui::Terminal};
 use svetsec_core::{
-    App, ArticleContent, ArticleImage, ArticleSummary, Effect, HelpTarget, Message, Tab,
+    App, ArticleContent, ArticleImage, ArticleSummary, Comment, Effect, HelpTarget, Message, Tab,
 };
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
-use web_sys::{KeyboardEvent, MouseEvent, Request, RequestCredentials, RequestInit, Response};
+use web_sys::{
+    HtmlInputElement, HtmlTextAreaElement, KeyboardEvent, MouseEvent, Request, RequestCredentials,
+    RequestInit, Response,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DomSignature {
@@ -29,6 +32,11 @@ struct DomSignature {
     article_cursor_column: u16,
     python_running: bool,
     python_output: bool,
+    authenticated: bool,
+    username: Option<String>,
+    comments_len: usize,
+    comments_loading: bool,
+    comments_error: bool,
     language_notice: bool,
     image_count: usize,
 }
@@ -120,6 +128,11 @@ impl DomSignature {
             article_cursor_column: app.article_cursor_column(),
             python_running: app.python_running(),
             python_output: app.python_output().is_some(),
+            authenticated: app.authenticated(),
+            username: app.username().map(str::to_owned),
+            comments_len: app.comments().len(),
+            comments_loading: app.comments_loading(),
+            comments_error: app.comments_error().is_some(),
             language_notice: app.language_notice(),
             image_count: app
                 .opened_article()
@@ -236,7 +249,10 @@ fn apply_web_route(app: Rc<RefCell<App>>, route: WebRoute, route_state: Rc<RefCe
                 };
                 let _ = app.borrow_mut().update(Message::SelectArticle(index));
                 match fetch_article(&slug, language).await {
-                    Ok(article) => app.borrow_mut().set_opened_article(article),
+                    Ok(article) => {
+                        app.borrow_mut().set_opened_article(article);
+                        load_comments(Rc::clone(&app));
+                    }
                     Err(_) => app
                         .borrow_mut()
                         .set_articles_error("Could not load this Markdown file."),
@@ -275,10 +291,12 @@ fn main() -> io::Result<()> {
     let terminal = Terminal::new(backend)?;
     install_browser_events(Rc::clone(&app), Rc::clone(&viewport))
         .map_err(|error| io::Error::other(format!("browser event setup failed: {error:?}")))?;
+    install_account_events(Rc::clone(&app))
+        .map_err(|error| io::Error::other(format!("account event setup failed: {error:?}")))?;
     install_route_events(Rc::clone(&app), Rc::clone(&route_state))
         .map_err(|error| io::Error::other(format!("browser route setup failed: {error:?}")))?;
 
-    poll_session(Rc::clone(&app));
+    load_session(Rc::clone(&app));
     animate_ui(Rc::clone(&app));
     apply_web_route(Rc::clone(&app), initial_route, Rc::clone(&route_state));
 
@@ -305,6 +323,7 @@ fn main() -> io::Result<()> {
                 let _ = sync_browser_navigation_links(area, &app);
                 let _ = sync_browser_code_actions(area, &app);
                 let _ = sync_browser_output_close(area, &app);
+                let _ = sync_browser_comment_actions(area, &app);
                 let _ = sync_browser_images(&app, area, &sync_image_ids);
                 let _ = sync_mobile_controls(&app);
                 let _ = sync_browser_native_scroll(&app);
@@ -473,6 +492,14 @@ fn sync_mobile_controls(app: &App) -> Result<(), JsValue> {
             svetsec_core::Language::Ru => "← Статьи",
         }));
     }
+    if let Some(comment) = controls.query_selector("[data-article-action=\"comment\"]")? {
+        comment.set_text_content(Some(match (app.signed_in(), app.language()) {
+            (true, svetsec_core::Language::En) => "Comment",
+            (true, svetsec_core::Language::Ru) => "Написать",
+            (false, svetsec_core::Language::En) => "Sign in",
+            (false, svetsec_core::Language::Ru) => "Войти",
+        }));
+    }
     for (tab, selector) in [
         (Tab::Main, "main"),
         (Tab::Articles, "articles"),
@@ -559,6 +586,23 @@ fn sync_browser_output_close(
     clear_cell_class(&grid, ".web-output-close")?;
     if let Some(area) = svetsec_ui::python_output_close_area(area, app) {
         set_area_class(&grid, area, "web-clickable web-output-close")?;
+    }
+    Ok(())
+}
+
+fn sync_browser_comment_actions(
+    area: ratzilla::ratatui::layout::Rect,
+    app: &App,
+) -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+        return Ok(());
+    };
+    clear_cell_class(&grid, ".web-comment-action")?;
+    for (_, area) in svetsec_ui::comment_action_areas(area, app) {
+        set_area_class(&grid, area, "web-clickable web-comment-action")?;
     }
     Ok(())
 }
@@ -856,6 +900,16 @@ fn install_browser_events(
             activate.forget();
         }
 
+        if let Some(button) = controls.query_selector("[data-article-action=\"comment\"]")? {
+            let button_app = Rc::clone(&app);
+            let activate = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+                event.prevent_default();
+                begin_comment(Rc::clone(&button_app));
+            });
+            button.add_event_listener_with_callback("click", activate.as_ref().unchecked_ref())?;
+            activate.forget();
+        }
+
         for (selector, tab) in [
             ("main", Tab::Main),
             ("articles", Tab::Articles),
@@ -885,6 +939,13 @@ fn install_browser_events(
 
     let key_app = Rc::clone(&app);
     let keydown = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
+        if modal_open() {
+            if event.key() == "Escape" {
+                hide_modal("auth-modal");
+                hide_modal("comment-modal");
+            }
+            return;
+        }
         if event.meta_key() || event.ctrl_key() || event.alt_key() {
             return;
         }
@@ -985,6 +1046,22 @@ fn handle_key(app: Rc<RefCell<App>>, code: KeyCode) {
     }
     if selected == Tab::Articles {
         let article_open = app.borrow().opened_article().is_some();
+        if article_open && char_is(&code, &['m', 'ь']) {
+            begin_comment(app);
+            return;
+        }
+        if article_open && char_is(&code, &['a', 'ф']) {
+            show_auth_modal(false, false, app.borrow().language());
+            return;
+        }
+        if article_open && char_is(&code, &['s', 'ы']) {
+            show_auth_modal(false, true, app.borrow().language());
+            return;
+        }
+        if article_open && char_is(&code, &['d', 'в']) && app.borrow().signed_in() {
+            logout(app);
+            return;
+        }
         if article_open && char_is(&code, &['x', 'ч']) && app.borrow().python_output().is_some() {
             let _ = app.borrow_mut().update(Message::DismissPythonOutput);
             return;
@@ -1179,6 +1256,20 @@ fn activate_at(
         .is_some_and(|area| area.contains((column, row).into()))
     {
         let _ = app.borrow_mut().update(Message::DismissPythonOutput);
+        return;
+    }
+    let comment_action = {
+        let app = app.borrow();
+        svetsec_ui::comment_action_at(area, column, row, &app)
+    };
+    if let Some(action) = comment_action {
+        let language = app.borrow().language();
+        match action {
+            svetsec_ui::CommentAction::Login => show_auth_modal(false, false, language),
+            svetsec_ui::CommentAction::Register => show_auth_modal(false, true, language),
+            svetsec_ui::CommentAction::Add => begin_comment(Rc::clone(&app)),
+            svetsec_ui::CommentAction::Logout => logout(Rc::clone(&app)),
+        }
         return;
     }
     let code_action = {
@@ -1436,18 +1527,10 @@ fn apply_effect(effect: Effect) {
     }
 }
 
-fn poll_session(app: Rc<RefCell<App>>) {
+fn load_session(app: Rc<RefCell<App>>) {
     spawn_local(async move {
-        loop {
-            if let Ok(state) = fetch_session("POST", "/api/heartbeat", None).await {
-                let _ = app
-                    .borrow_mut()
-                    .update(Message::SetAuthenticated(state.authenticated));
-                let _ = app
-                    .borrow_mut()
-                    .update(Message::SetOwnerOnline(state.owner_online));
-            }
-            TimeoutFuture::new(15_000).await;
+        if let Ok(state) = fetch_session("GET", "/api/session", None).await {
+            apply_session_state(&app, state);
         }
     });
 }
@@ -1481,28 +1564,420 @@ fn schedule_language_notice_hide(app: Rc<RefCell<App>>) {
 }
 
 fn begin_login(app: Rc<RefCell<App>>) {
-    let Some(window) = web_sys::window() else {
-        return;
-    };
-    let Ok(Some(password)) = window.prompt_with_message("Owner password") else {
-        return;
-    };
-    spawn_local(async move {
-        let body = serde_json::json!({ "password": password }).to_string();
-        if let Ok(state) = fetch_session("POST", "/api/session", Some(body)).await {
-            let _ = app
-                .borrow_mut()
-                .update(Message::SetAuthenticated(state.authenticated));
-            let _ = app
-                .borrow_mut()
-                .update(Message::SetOwnerOnline(state.owner_online));
-        }
-    });
+    show_auth_modal(true, false, app.borrow().language());
 }
 
 struct SessionState {
     authenticated: bool,
-    owner_online: bool,
+    username: Option<String>,
+}
+
+fn apply_session_state(app: &Rc<RefCell<App>>, state: SessionState) {
+    let mut app = app.borrow_mut();
+    let _ = app.update(Message::SetAuthenticated(state.authenticated));
+    app.set_user(state.username);
+}
+
+fn install_account_events(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let auth_form = document
+        .get_element_by_id("auth-form")
+        .ok_or_else(|| JsValue::from_str("auth form unavailable"))?;
+    for action in ["login", "register"] {
+        let Some(button) = auth_form.query_selector(&format!("[data-auth-action=\"{action}\"]"))?
+        else {
+            continue;
+        };
+        let form = auth_form.clone();
+        let action = action.to_owned();
+        let select = Closure::<dyn FnMut(MouseEvent)>::new(move |_: MouseEvent| {
+            let _ = form.set_attribute("data-action", &action);
+        });
+        button.add_event_listener_with_callback("click", select.as_ref().unchecked_ref())?;
+        select.forget();
+    }
+
+    let auth_app = Rc::clone(&app);
+    let submit = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        event.prevent_default();
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let owner = document
+            .get_element_by_id("auth-modal")
+            .and_then(|modal| modal.get_attribute("data-mode"))
+            .as_deref()
+            == Some("owner");
+        let register = document
+            .get_element_by_id("auth-form")
+            .and_then(|form| form.get_attribute("data-action"))
+            .as_deref()
+            == Some("register");
+        let username = input_value(&document, "auth-username");
+        let password = input_value(&document, "auth-password");
+        if password.is_empty() || (!owner && username.is_empty()) {
+            set_modal_error("auth-error", "Fill in all fields.");
+            return;
+        }
+        set_modal_error("auth-error", "Working…");
+        let app = Rc::clone(&auth_app);
+        spawn_local(async move {
+            let (url, body) = if owner {
+                (
+                    "/api/session",
+                    serde_json::json!({ "password": password }).to_string(),
+                )
+            } else {
+                (
+                    if register {
+                        "/api/users"
+                    } else {
+                        "/api/users/session"
+                    },
+                    serde_json::json!({ "username": username, "password": password }).to_string(),
+                )
+            };
+            match fetch_session("POST", url, Some(body)).await {
+                Ok(state) => {
+                    apply_session_state(&app, state);
+                    clear_input("auth-password");
+                    hide_modal("auth-modal");
+                    refresh_comment_modal(&app);
+                }
+                Err(error) => set_modal_error("auth-error", &js_error_message(&error)),
+            }
+        });
+    });
+    auth_form.add_event_listener_with_callback("submit", submit.as_ref().unchecked_ref())?;
+    submit.forget();
+
+    let comment_form = document
+        .get_element_by_id("comment-form")
+        .ok_or_else(|| JsValue::from_str("comment form unavailable"))?;
+    let comment_app = Rc::clone(&app);
+    let submit = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        event.prevent_default();
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let body = textarea_value(&document, "comment-body");
+        let slug = comment_app
+            .borrow()
+            .opened_article()
+            .map(|article| article.slug.clone());
+        let Some(slug) = slug else {
+            hide_modal("comment-modal");
+            return;
+        };
+        if body.trim().is_empty() {
+            set_modal_error("comment-error", "Write a comment first.");
+            return;
+        }
+        set_modal_error("comment-error", "Publishing…");
+        let app = Rc::clone(&comment_app);
+        spawn_local(async move {
+            let payload = serde_json::json!({ "body": body }).to_string();
+            match request_json(
+                "POST",
+                &format!("/api/articles/{slug}/comments"),
+                Some(payload),
+            )
+            .await
+            {
+                Ok(_) => {
+                    clear_textarea("comment-body");
+                    hide_modal("comment-modal");
+                    load_comments(app);
+                }
+                Err(error) => set_modal_error("comment-error", &js_error_message(&error)),
+            }
+        });
+    });
+    comment_form.add_event_listener_with_callback("submit", submit.as_ref().unchecked_ref())?;
+    submit.forget();
+
+    if let Some(button) = document.get_element_by_id("comment-sign-in") {
+        let login_app = Rc::clone(&app);
+        let open = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            event.prevent_default();
+            show_auth_modal(false, false, login_app.borrow().language());
+        });
+        button.add_event_listener_with_callback("click", open.as_ref().unchecked_ref())?;
+        open.forget();
+    }
+
+    let close_buttons = document.query_selector_all("[data-modal-close]")?;
+    for index in 0..close_buttons.length() {
+        let Some(button) = close_buttons.item(index) else {
+            continue;
+        };
+        let Some(id) = button
+            .dyn_ref::<web_sys::Element>()
+            .and_then(|button| button.get_attribute("data-modal-close"))
+        else {
+            continue;
+        };
+        let close = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            event.prevent_default();
+            hide_modal(&id);
+        });
+        button.add_event_listener_with_callback("click", close.as_ref().unchecked_ref())?;
+        close.forget();
+    }
+    Ok(())
+}
+
+fn show_auth_modal(owner: bool, register: bool, language: svetsec_core::Language) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(modal) = document.get_element_by_id("auth-modal") else {
+        return;
+    };
+    let _ = modal.set_attribute("data-mode", if owner { "owner" } else { "reader" });
+    let _ = document.get_element_by_id("auth-form").and_then(|form| {
+        form.set_attribute("data-action", if register { "register" } else { "login" })
+            .ok()
+    });
+    localize_account_modals(&document, language);
+    if let Some(title) = document.get_element_by_id("auth-title") {
+        title.set_text_content(Some(match (owner, register, language) {
+            (true, _, svetsec_core::Language::En) => "Owner sign in",
+            (true, _, svetsec_core::Language::Ru) => "Вход владельца",
+            (false, true, svetsec_core::Language::En) => "Create reader account",
+            (false, true, svetsec_core::Language::Ru) => "Аккаунт читателя",
+            (false, false, svetsec_core::Language::En) => "Reader sign in",
+            (false, false, svetsec_core::Language::Ru) => "Вход читателя",
+        }));
+    }
+    if let Some(password) = document
+        .get_element_by_id("auth-password")
+        .and_then(|input| input.dyn_into::<HtmlInputElement>().ok())
+    {
+        password.set_autocomplete(if register {
+            "new-password"
+        } else {
+            "current-password"
+        });
+    }
+    set_modal_error("auth-error", "");
+    let _ = modal.remove_attribute("hidden");
+    let focus = if owner {
+        "auth-password"
+    } else {
+        "auth-username"
+    };
+    if let Some(input) = document
+        .get_element_by_id(focus)
+        .and_then(|input| input.dyn_into::<HtmlInputElement>().ok())
+    {
+        let _ = input.focus();
+    }
+}
+
+fn localize_account_modals(document: &web_sys::Document, language: svetsec_core::Language) {
+    let texts = match language {
+        svetsec_core::Language::En => [
+            ("auth-username-label", "Username"),
+            ("auth-password-label", "Password"),
+            ("auth-login", "Sign in"),
+            ("auth-register", "Register"),
+            ("auth-cancel", "Cancel"),
+            ("comment-title", "Comments"),
+            ("comment-sign-in", "Sign in / register"),
+            ("comment-message-label", "Message"),
+            ("comment-publish", "Publish"),
+            ("comment-cancel", "Cancel"),
+        ],
+        svetsec_core::Language::Ru => [
+            ("auth-username-label", "Имя пользователя"),
+            ("auth-password-label", "Пароль"),
+            ("auth-login", "Войти"),
+            ("auth-register", "Регистрация"),
+            ("auth-cancel", "Отмена"),
+            ("comment-title", "Комментарии"),
+            ("comment-sign-in", "Войти / зарегистрироваться"),
+            ("comment-message-label", "Сообщение"),
+            ("comment-publish", "Опубликовать"),
+            ("comment-cancel", "Отмена"),
+        ],
+    };
+    for (id, text) in texts {
+        if let Some(element) = document.get_element_by_id(id) {
+            element.set_text_content(Some(text));
+        }
+    }
+}
+
+fn begin_comment(app: Rc<RefCell<App>>) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(modal) = document.get_element_by_id("comment-modal") else {
+        return;
+    };
+    localize_account_modals(&document, app.borrow().language());
+    populate_comment_modal(&document, &app.borrow());
+    set_modal_error("comment-error", "");
+    let _ = modal.remove_attribute("hidden");
+    if let Some(input) = document
+        .get_element_by_id("comment-body")
+        .and_then(|input| input.dyn_into::<HtmlTextAreaElement>().ok())
+    {
+        let _ = input.focus();
+    }
+}
+
+fn refresh_comment_modal(app: &Rc<RefCell<App>>) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    if document
+        .get_element_by_id("comment-modal")
+        .is_some_and(|modal| !modal.has_attribute("hidden"))
+    {
+        populate_comment_modal(&document, &app.borrow());
+    }
+}
+
+fn populate_comment_modal(document: &web_sys::Document, app: &App) {
+    let Some(modal) = document.get_element_by_id("comment-modal") else {
+        return;
+    };
+    let _ = modal.set_attribute(
+        "data-signed-in",
+        if app.signed_in() { "true" } else { "false" },
+    );
+    let Some(list) = document.get_element_by_id("comment-list") else {
+        return;
+    };
+    list.set_text_content(None);
+    if app.comments_loading() || app.comments_error().is_some() {
+        if let Ok(message) = document.create_element("p") {
+            message.set_text_content(Some(if app.comments_loading() {
+                match app.language() {
+                    svetsec_core::Language::En => "Loading comments…",
+                    svetsec_core::Language::Ru => "Загрузка комментариев…",
+                }
+            } else {
+                app.comments_error().unwrap_or_default()
+            }));
+            let _ = list.append_child(&message);
+        }
+        return;
+    }
+    if app.comments().is_empty() {
+        if let Ok(empty) = document.create_element("p") {
+            empty.set_text_content(Some(match app.language() {
+                svetsec_core::Language::En => "No comments yet.",
+                svetsec_core::Language::Ru => "Комментариев пока нет.",
+            }));
+            let _ = list.append_child(&empty);
+        }
+        return;
+    }
+    for comment in app.comments() {
+        let (Ok(entry), Ok(author), Ok(body)) = (
+            document.create_element("article"),
+            document.create_element("strong"),
+            document.create_element("div"),
+        ) else {
+            continue;
+        };
+        entry.set_class_name("comment-entry");
+        author.set_text_content(Some(&format!("@{}", comment.author)));
+        body.set_text_content(Some(&comment.body));
+        let _ = entry.append_child(&author);
+        let _ = entry.append_child(&body);
+        let _ = list.append_child(&entry);
+    }
+}
+
+fn logout(app: Rc<RefCell<App>>) {
+    spawn_local(async move {
+        if request("DELETE", "/api/session", None).await.is_ok() {
+            apply_session_state(
+                &app,
+                SessionState {
+                    authenticated: false,
+                    username: None,
+                },
+            );
+            refresh_comment_modal(&app);
+        }
+    });
+}
+
+fn modal_open() -> bool {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .is_some_and(|document| {
+            ["auth-modal", "comment-modal"].into_iter().any(|id| {
+                document
+                    .get_element_by_id(id)
+                    .is_some_and(|modal| !modal.has_attribute("hidden"))
+            })
+        })
+}
+
+fn hide_modal(id: &str) {
+    if let Some(modal) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+    {
+        let _ = modal.set_attribute("hidden", "");
+    }
+}
+
+fn input_value(document: &web_sys::Document, id: &str) -> String {
+    document
+        .get_element_by_id(id)
+        .and_then(|input| input.dyn_into::<HtmlInputElement>().ok())
+        .map_or_else(String::new, |input| input.value())
+}
+
+fn textarea_value(document: &web_sys::Document, id: &str) -> String {
+    document
+        .get_element_by_id(id)
+        .and_then(|input| input.dyn_into::<HtmlTextAreaElement>().ok())
+        .map_or_else(String::new, |input| input.value())
+}
+
+fn clear_input(id: &str) {
+    if let Some(input) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+        .and_then(|input| input.dyn_into::<HtmlInputElement>().ok())
+    {
+        input.set_value("");
+    }
+}
+
+fn clear_textarea(id: &str) {
+    if let Some(input) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+        .and_then(|input| input.dyn_into::<HtmlTextAreaElement>().ok())
+    {
+        input.set_value("");
+    }
+}
+
+fn set_modal_error(id: &str, message: &str) {
+    if let Some(error) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+    {
+        error.set_text_content(Some(message));
+    }
+}
+
+fn js_error_message(error: &JsValue) -> String {
+    error
+        .as_string()
+        .unwrap_or_else(|| "Request failed. Try again.".into())
 }
 
 async fn fetch_session(
@@ -1514,12 +1989,10 @@ async fn fetch_session(
     let authenticated = js_sys::Reflect::get(&json, &JsValue::from_str("authenticated"))?
         .as_bool()
         .unwrap_or(false);
-    let owner_online = js_sys::Reflect::get(&json, &JsValue::from_str("owner_online"))?
-        .as_bool()
-        .unwrap_or(false);
+    let username = js_sys::Reflect::get(&json, &JsValue::from_str("username"))?.as_string();
     Ok(SessionState {
         authenticated,
-        owner_online,
+        username,
     })
 }
 
@@ -1566,13 +2039,42 @@ fn load_article_slug(app: Rc<RefCell<App>>, slug: String) {
     let language = app.borrow().language();
     spawn_local(async move {
         match fetch_article(&slug, language).await {
-            Ok(article) => app.borrow_mut().set_opened_article(article),
+            Ok(article) => {
+                app.borrow_mut().set_opened_article(article);
+                load_comments(Rc::clone(&app));
+            }
             Err(_) => {
                 let error = match app.borrow().language() {
                     svetsec_core::Language::En => "Could not load this Markdown file.",
                     svetsec_core::Language::Ru => "Не удалось загрузить Markdown-файл.",
                 };
                 app.borrow_mut().set_articles_error(error);
+            }
+        }
+    });
+}
+
+fn load_comments(app: Rc<RefCell<App>>) {
+    let Some(slug) = app
+        .borrow()
+        .opened_article()
+        .map(|article| article.slug.clone())
+    else {
+        return;
+    };
+    app.borrow_mut().begin_comments_load();
+    spawn_local(async move {
+        match fetch_comments(&slug).await {
+            Ok(comments) => {
+                app.borrow_mut().set_comments(comments);
+                refresh_comment_modal(&app);
+            }
+            Err(_) => {
+                let error = match app.borrow().language() {
+                    svetsec_core::Language::En => "Could not load comments.",
+                    svetsec_core::Language::Ru => "Не удалось загрузить комментарии.",
+                };
+                app.borrow_mut().set_comments_error(error);
             }
         }
     });
@@ -1747,6 +2249,35 @@ async fn fetch_article(
     })
 }
 
+async fn fetch_comments(slug: &str) -> Result<Vec<Comment>, JsValue> {
+    let json = request_json("GET", &format!("/api/articles/{slug}/comments"), None).await?;
+    let mut comments = Vec::new();
+    for value in js_sys::Array::from(&json).iter() {
+        let string = |field: &str| {
+            js_sys::Reflect::get(&value, &JsValue::from_str(field))
+                .ok()
+                .and_then(|value| value.as_string())
+                .unwrap_or_default()
+        };
+        let number = |field: &str| {
+            js_sys::Reflect::get(&value, &JsValue::from_str(field))
+                .ok()
+                .and_then(|value| value.as_f64())
+                .unwrap_or_default() as i64
+        };
+        comments.push(Comment {
+            id: number("id"),
+            author: string("author"),
+            owner: js_sys::Reflect::get(&value, &JsValue::from_str("owner"))?
+                .as_bool()
+                .unwrap_or(false),
+            body: string("body"),
+            created_at: number("created_at"),
+        });
+    }
+    Ok(comments)
+}
+
 fn string_array(value: &JsValue, field: &str) -> Vec<String> {
     js_sys::Reflect::get(value, &JsValue::from_str(field))
         .ok()
@@ -1764,6 +2295,11 @@ fn char_is(code: &KeyCode, characters: &[char]) -> bool {
 }
 
 async fn request_json(method: &str, url: &str, body: Option<String>) -> Result<JsValue, JsValue> {
+    let response = request(method, url, body).await?;
+    JsFuture::from(response.json()?).await
+}
+
+async fn request(method: &str, url: &str, body: Option<String>) -> Result<Response, JsValue> {
     let options = RequestInit::new();
     options.set_method(method);
     options.set_credentials(RequestCredentials::SameOrigin);
@@ -1779,9 +2315,19 @@ async fn request_json(method: &str, url: &str, body: Option<String>) -> Result<J
         .await?
         .dyn_into::<Response>()?;
     if !response.ok() {
-        return Err(JsValue::from_str("session request failed"));
+        let status = response.status();
+        let message = match response.json() {
+            Ok(json) => JsFuture::from(json).await.ok().and_then(|json| {
+                js_sys::Reflect::get(&json, &JsValue::from_str("error"))
+                    .ok()
+                    .and_then(|error| error.as_string())
+            }),
+            Err(_) => None,
+        }
+        .unwrap_or_else(|| format!("Request failed ({status})."));
+        return Err(JsValue::from_str(&message));
     }
-    JsFuture::from(response.json()?).await
+    Ok(response)
 }
 
 #[cfg(test)]
