@@ -265,7 +265,7 @@ fn main() -> io::Result<()> {
     });
     let app = Rc::new(RefCell::new(initial_app));
     let viewport = Rc::new(Cell::new(ratzilla::ratatui::layout::Rect::default()));
-    let browser_image_count = Rc::new(Cell::new(0_usize));
+    let browser_image_ids = Rc::new(RefCell::new(Vec::<String>::new()));
     let dom_signature = Rc::new(RefCell::new(None::<DomSignature>));
     let route_state = Rc::new(RefCell::new(RouteState {
         current: initial_route.clone(),
@@ -294,7 +294,7 @@ fn main() -> io::Result<()> {
         if changed {
             *dom_signature.borrow_mut() = Some(signature);
             let sync_app = Rc::clone(&app_handle);
-            let sync_image_count = Rc::clone(&browser_image_count);
+            let sync_image_ids = Rc::clone(&browser_image_ids);
             let area = frame.area();
             spawn_local(async move {
                 TimeoutFuture::new(0).await;
@@ -305,7 +305,7 @@ fn main() -> io::Result<()> {
                 let _ = sync_browser_navigation_links(area, &app);
                 let _ = sync_browser_code_actions(area, &app);
                 let _ = sync_browser_output_close(area, &app);
-                let _ = sync_browser_images(&app, area, &sync_image_count);
+                let _ = sync_browser_images(&app, area, &sync_image_ids);
                 let _ = sync_mobile_controls(&app);
                 let _ = sync_browser_native_scroll(&app);
                 let _ = sync_browser_text_selection();
@@ -789,6 +789,10 @@ fn install_browser_events(
         let _ = scroll_app
             .borrow_mut()
             .update(Message::SetArticleScroll(row));
+        if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+            let _ =
+                position_browser_images(&document, f64::from(scroll_terminal.scroll_top().max(0)));
+        }
     });
     terminal.add_event_listener_with_callback("scroll", scroll.as_ref().unchecked_ref())?;
     scroll.forget();
@@ -1225,7 +1229,7 @@ fn activate_at(
 fn sync_browser_images(
     app: &App,
     area: ratzilla::ratatui::layout::Rect,
-    previous_count: &Cell<usize>,
+    previous_ids: &RefCell<Vec<String>>,
 ) -> Result<(), JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("window unavailable"))?;
     let document = window
@@ -1251,9 +1255,26 @@ fn sync_browser_images(
         return Ok(());
     }
 
+    clear_cell_class(&grid, ".web-native-image-cell")?;
+    let viewport = svetsec_ui::native_image_viewport(area, app);
+    let article_open = app.selected() == Tab::Articles && app.opened_article().is_some();
+    let scroll_top = if article_open {
+        document
+            .get_element_by_id("terminal")
+            .map_or(0.0, |terminal| f64::from(terminal.scroll_top().max(0)))
+    } else {
+        0.0
+    };
+    let document_scroll_rows = if article_open {
+        i32::from(app.article_scroll())
+    } else {
+        0
+    };
     let placements = svetsec_ui::native_image_placements(area, app);
-    for (index, placement) in placements.iter().enumerate() {
-        let id = format!("article-native-image-{index}");
+    let mut active_ids = Vec::with_capacity(placements.len());
+    for placement in &placements {
+        let id = browser_image_id(placement.key, placement.source);
+        active_ids.push(id.clone());
         let image = match document.get_element_by_id(&id) {
             Some(image) => image,
             None => {
@@ -1265,38 +1286,130 @@ fn sync_browser_images(
             }
         };
         let left = row_rect.left() + f64::from(placement.x) * cell_width;
-        let top = row_rect.top() + f64::from(placement.y) * row_height;
+        let document_top =
+            row_rect.top() + f64::from(placement.y + document_scroll_rows) * row_height;
         let width = f64::from(placement.width) * cell_width;
         let height = f64::from(placement.height) * row_height;
-        let clip_top = f64::from(placement.clip_top) * row_height;
-        let clip_right = f64::from(placement.clip_right) * cell_width;
-        let clip_bottom = f64::from(placement.clip_bottom) * row_height;
+        let Some(viewport) = viewport else {
+            continue;
+        };
+        let content_top = row_rect.top() + f64::from(viewport.top()) * row_height;
+        let content_right = row_rect.left() + f64::from(viewport.right()) * cell_width;
+        let content_bottom = row_rect.top() + f64::from(viewport.bottom()) * row_height;
         let source = if placement.source.starts_with('/') {
             placement.source.to_owned()
         } else {
             format!("/api/github/assets/{}", placement.source)
         };
-        image.set_attribute("src", &source)?;
+        if image.get_attribute("src").as_deref() != Some(&source) {
+            image.set_attribute("src", &source)?;
+        }
         image.set_attribute("alt", placement.alt)?;
-        image.set_attribute(
-            "style",
-            &format!(
-                "display:block;left:{left}px;top:{top}px;width:{width}px;height:{height}px;\
-                 clip-path:inset({clip_top}px {clip_right}px {clip_bottom}px 0px);{}",
-                if placement.rounded {
-                    "border-radius:50%;"
-                } else {
-                    ""
-                }
-            ),
-        )?;
-    }
-    for index in placements.len()..previous_count.get() {
-        if let Some(image) = document.get_element_by_id(&format!("article-native-image-{index}")) {
-            image.set_attribute("style", "display:none")?;
+        image.set_attribute("data-document-top", &document_top.to_string())?;
+        image.set_attribute("data-content-top", &content_top.to_string())?;
+        image.set_attribute("data-content-right", &content_right.to_string())?;
+        image.set_attribute("data-content-bottom", &content_bottom.to_string())?;
+        image.set_attribute("data-image-left", &left.to_string())?;
+        image.set_attribute("data-image-width", &width.to_string())?;
+        image.set_attribute("data-image-height", &height.to_string())?;
+        let Some(html_image) = image.dyn_ref::<web_sys::HtmlElement>() else {
+            continue;
+        };
+        html_image
+            .style()
+            .set_property("left", &format!("{left}px"))?;
+        html_image
+            .style()
+            .set_property("width", &format!("{width}px"))?;
+        html_image
+            .style()
+            .set_property("height", &format!("{height}px"))?;
+        html_image
+            .style()
+            .set_property("border-radius", if placement.rounded { "50%" } else { "0" })?;
+
+        let visible_height = placement
+            .height
+            .saturating_sub(placement.clip_top)
+            .saturating_sub(placement.clip_bottom);
+        let visible_width = placement.width.saturating_sub(placement.clip_right);
+        if visible_height > 0 && visible_width > 0 {
+            set_area_class(
+                &grid,
+                ratzilla::ratatui::layout::Rect::new(
+                    placement.x.max(0) as u16,
+                    (placement.y + i32::from(placement.clip_top)).max(0) as u16,
+                    visible_width,
+                    visible_height,
+                ),
+                "web-native-image-cell",
+            )?;
         }
     }
-    previous_count.set(placements.len());
+    position_browser_images(&document, scroll_top)?;
+    for id in previous_ids.borrow().iter() {
+        if !active_ids.contains(id)
+            && let Some(image) = document.get_element_by_id(id)
+        {
+            image.remove();
+        }
+    }
+    *previous_ids.borrow_mut() = active_ids;
+    Ok(())
+}
+
+fn browser_image_id(key: usize, source: &str) -> String {
+    let hash = source
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    format!("article-native-image-{key}-{hash:016x}")
+}
+
+fn position_browser_images(document: &web_sys::Document, scroll_top: f64) -> Result<(), JsValue> {
+    let images = document.query_selector_all(".native-article-image")?;
+    for index in 0..images.length() {
+        let Some(node) = images.item(index) else {
+            continue;
+        };
+        let Some(image) = node.dyn_ref::<web_sys::HtmlElement>() else {
+            continue;
+        };
+        let number = |name: &str| {
+            image
+                .get_attribute(name)
+                .and_then(|value| value.parse::<f64>().ok())
+        };
+        let (Some(document_top), Some(content_top), Some(content_right), Some(content_bottom)) = (
+            number("data-document-top"),
+            number("data-content-top"),
+            number("data-content-right"),
+            number("data-content-bottom"),
+        ) else {
+            continue;
+        };
+        let (Some(left), Some(width), Some(height)) = (
+            number("data-image-left"),
+            number("data-image-width"),
+            number("data-image-height"),
+        ) else {
+            continue;
+        };
+        let top = document_top - scroll_top;
+        let clip_top = (content_top - top).clamp(0.0, height);
+        let clip_right = (left + width - content_right).clamp(0.0, width);
+        let clip_bottom = (top + height - content_bottom).clamp(0.0, height);
+        let visible = clip_top + clip_bottom < height && clip_right < width;
+        image
+            .style()
+            .set_property("display", if visible { "block" } else { "none" })?;
+        image.style().set_property("top", &format!("{top}px"))?;
+        image.style().set_property(
+            "clip-path",
+            &format!("inset({clip_top}px {clip_right}px {clip_bottom}px 0px)"),
+        )?;
+    }
     Ok(())
 }
 
@@ -1677,8 +1790,8 @@ mod tests {
     use svetsec_core::{App, ArticleContent, Message, Tab};
 
     use super::{
-        WebRoute, browser_key_code, cell_contains_selectable_text, grid_axis, grid_cell_axis,
-        selection_runs,
+        WebRoute, browser_image_id, browser_key_code, cell_contains_selectable_text, grid_axis,
+        grid_cell_axis, selection_runs,
     };
 
     #[test]
@@ -1721,6 +1834,14 @@ mod tests {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         assert_eq!(selection_runs(&cells), vec![(0, 2), (4, 4)]);
+    }
+
+    #[test]
+    fn native_images_keep_stable_distinct_dom_ids() {
+        let first = browser_image_id(0, "assets/first.jpg");
+        assert_eq!(first, browser_image_id(0, "assets/first.jpg"));
+        assert_ne!(first, browser_image_id(1, "assets/first.jpg"));
+        assert_ne!(first, browser_image_id(0, "assets/second.jpg"));
     }
 
     #[test]

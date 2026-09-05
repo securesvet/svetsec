@@ -7,29 +7,30 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
 };
 use svetsec_core::{
-    App, ArticleImage, DOT_WELL_FRAMES, DOT_WELL_LANGUAGE, DOT_WELL_ROWS, HelpTarget, Language,
-    PROJECTS, Tab,
+    App, ArticleContent, ArticleImage, DOT_WELL_FRAMES, DOT_WELL_LANGUAGE, DOT_WELL_ROWS,
+    HelpTarget, Language, PROJECTS, Tab,
 };
 
-const WHITE: Color = Color::Rgb(247, 251, 255);
-const CANVAS: Color = Color::Rgb(7, 10, 14);
-const PAPER: Color = Color::Rgb(10, 15, 21);
-const SOFT_GRAY: Color = Color::Rgb(28, 42, 54);
-const PANEL: Color = Color::Rgb(13, 19, 27);
-const PANEL_ALT: Color = Color::Rgb(17, 25, 35);
-const INK: Color = Color::Rgb(230, 237, 243);
-const GRAPHITE: Color = Color::Rgb(168, 179, 191);
-const MID_GRAY: Color = Color::Rgb(82, 97, 112);
-const BODY: Color = Color::Rgb(199, 208, 217);
-const MUTED: Color = Color::Rgb(131, 145, 160);
-const CONTROL: Color = Color::Rgb(37, 52, 66);
+const WHITE: Color = Color::Rgb(255, 255, 255);
+const CANVAS: Color = Color::Rgb(248, 249, 251);
+const PAPER: Color = Color::Rgb(250, 250, 248);
+const SOFT_GRAY: Color = Color::Rgb(232, 233, 231);
+const PANEL: Color = Color::Rgb(255, 255, 255);
+const PANEL_ALT: Color = Color::Rgb(245, 246, 244);
+const INK: Color = Color::Rgb(24, 26, 28);
+const GRAPHITE: Color = Color::Rgb(70, 74, 78);
+const MID_GRAY: Color = Color::Rgb(148, 152, 154);
+const BODY: Color = Color::Rgb(54, 58, 61);
+const MUTED: Color = Color::Rgb(105, 109, 112);
+const CONTROL: Color = Color::Rgb(76, 117, 152);
 const CONTROL_ACTIVE: Color = Color::Rgb(49, 93, 130);
-const ONLINE_GREEN: Color = Color::Rgb(54, 211, 126);
-const CODE_KEYWORD: Color = Color::Rgb(187, 154, 247);
-const CODE_STRING: Color = Color::Rgb(105, 203, 190);
-const CODE_NUMBER: Color = Color::Rgb(244, 162, 97);
-const CODE_COMMENT: Color = Color::Rgb(126, 142, 156);
-const CODE_FOCUS: Color = Color::Rgb(24, 36, 51);
+const ONLINE_GREEN: Color = Color::Rgb(18, 145, 79);
+const LINK_BLUE: Color = Color::Rgb(28, 100, 159);
+const CODE_KEYWORD: Color = Color::Rgb(102, 53, 158);
+const CODE_STRING: Color = Color::Rgb(20, 110, 100);
+const CODE_NUMBER: Color = Color::Rgb(176, 78, 22);
+const CODE_COMMENT: Color = Color::Rgb(100, 112, 124);
+const CODE_FOCUS: Color = Color::Rgb(236, 242, 248);
 const MOBILE_BREAKPOINT: u16 = 56;
 const RESUME_LINK_LABEL: &str = "svetsec.ru/resume";
 
@@ -85,6 +86,7 @@ struct UiLayout {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ArticleImagePlacement<'a> {
+    pub key: usize,
     pub source: &'a str,
     pub alt: &'a str,
     pub x: i32,
@@ -466,8 +468,13 @@ pub fn resume_link_area(area: Rect, app: &App) -> Option<Rect> {
 
 #[must_use]
 pub fn article_viewport_rows(area: Rect) -> u16 {
-    let (_, _, _, _, height) = article_geometry(area);
-    height.max(1)
+    article_viewport_area(area).height.max(1)
+}
+
+#[must_use]
+pub fn article_viewport_area(area: Rect) -> Rect {
+    let (_, _, left, top, height) = article_geometry(area);
+    Rect::new(left, top, article_content_width(area), height)
 }
 
 #[must_use]
@@ -559,7 +566,7 @@ fn article_geometry(area: Rect) -> (Rect, bool, u16, u16, u16) {
     let horizontal_padding = if compact { 1 } else { 2 };
     let bottom_padding = if compact { 0 } else { 1 };
     let left = panel.left().saturating_add(1 + horizontal_padding);
-    let top = panel.top().saturating_add(2);
+    let top = panel.top().saturating_add(3);
     let bottom = panel
         .bottom()
         .saturating_sub(1)
@@ -680,19 +687,23 @@ pub fn native_image_placements<'a>(area: Rect, app: &'a App) -> Vec<ArticleImage
     if app.language_notice() {
         return Vec::new();
     }
-    let (primary, compact, _, _, _) = article_geometry(area);
-    let horizontal_padding = if compact { 1 } else { 2 };
-    let bottom_padding = if compact { 0 } else { 1 };
-    let content_left = i32::from(primary.left()) + 1 + horizontal_padding;
-    let content_right = i32::from(primary.right()) - 1 - horizontal_padding;
-    let content_top = i32::from(primary.top()) + 2;
-    let content_bottom = i32::from(primary.bottom()) - 1 - bottom_padding;
-    let bounds = (content_right, content_top, content_bottom);
+    let Some(viewport) = native_image_viewport(area, app) else {
+        return Vec::new();
+    };
+    let content_left = i32::from(viewport.left());
+    let content_top = i32::from(viewport.top());
+    let bounds = (
+        i32::from(viewport.right()),
+        content_top,
+        i32::from(viewport.bottom()),
+    );
 
     match app.selected() {
         Tab::Info => app
             .profile_image()
-            .and_then(|image| image_placement(image, content_left, content_top + 8, bounds, true))
+            .and_then(|image| {
+                image_placement(image, 0, content_left, content_top + 8, bounds, true)
+            })
             .into_iter()
             .collect(),
         Tab::Articles => {
@@ -700,12 +711,14 @@ pub fn native_image_placements<'a>(area: Rect, app: &'a App) -> Vec<ArticleImage
                 return Vec::new();
             };
             let metadata_rows = i32::from(!article.labels.is_empty());
-            let markdown_top = content_top + 4 + metadata_rows - i32::from(app.article_scroll());
+            let markdown_top = content_top + 2 + metadata_rows - i32::from(app.article_scroll());
             markdown_image_offsets(&article.markdown, &article.images)
                 .into_iter()
-                .filter_map(|(image, offset)| {
+                .enumerate()
+                .filter_map(|(key, (image, offset))| {
                     image_placement(
                         image,
+                        key,
                         content_left,
                         markdown_top + i32::from(offset),
                         bounds,
@@ -718,8 +731,38 @@ pub fn native_image_placements<'a>(area: Rect, app: &'a App) -> Vec<ArticleImage
     }
 }
 
+#[must_use]
+pub fn native_image_viewport(area: Rect, app: &App) -> Option<Rect> {
+    match app.selected() {
+        Tab::Info => {
+            let (panel, compact) = primary_panel_area(area);
+            let horizontal_padding = if compact { 1 } else { 2 };
+            let bottom_padding = if compact { 0 } else { 1 };
+            let left = panel.left().saturating_add(1 + horizontal_padding);
+            let top = panel.top().saturating_add(2);
+            let right = panel
+                .right()
+                .saturating_sub(1)
+                .saturating_sub(horizontal_padding);
+            let bottom = panel
+                .bottom()
+                .saturating_sub(1)
+                .saturating_sub(bottom_padding);
+            Some(Rect::new(
+                left,
+                top,
+                right.saturating_sub(left),
+                bottom.saturating_sub(top),
+            ))
+        }
+        Tab::Articles if app.opened_article().is_some() => Some(article_viewport_area(area)),
+        Tab::Main | Tab::Articles | Tab::Projects => None,
+    }
+}
+
 fn image_placement<'a>(
     image: &'a ArticleImage,
+    key: usize,
     x: i32,
     y: i32,
     (content_right, content_top, content_bottom): (i32, i32, i32),
@@ -732,7 +775,8 @@ fn image_placement<'a>(
     let clip_top = (content_top - y).max(0).min(i32::from(height)) as u16;
     let clip_right = (right - content_right).max(0).min(i32::from(width)) as u16;
     let clip_bottom = (bottom - content_bottom).max(0).min(i32::from(height)) as u16;
-    (clip_top + clip_bottom < height && clip_right < width).then_some(ArticleImagePlacement {
+    (width > 0 && height > 0 && clip_right < width).then_some(ArticleImagePlacement {
+        key,
         source: &image.source,
         alt: &image.alt,
         x,
@@ -922,10 +966,7 @@ fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: b
                 resume_prefix(app.language(), compact),
                 Style::new().fg(INK).bold(),
             ),
-            Span::styled(
-                RESUME_LINK_LABEL,
-                Style::new().fg(Color::Rgb(143, 199, 242)).underlined(),
-            ),
+            Span::styled(RESUME_LINK_LABEL, Style::new().fg(LINK_BLUE).underlined()),
         ]));
         content.push(Line::default());
         content.push(Line::from(Span::styled(
@@ -1011,7 +1052,7 @@ fn render_projects_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
             )));
         }
         content.push(Line::from(Span::styled(tags, Style::new().fg(MUTED))));
-        let link_style = Style::new().fg(Color::Rgb(143, 199, 242)).underlined();
+        let link_style = Style::new().fg(LINK_BLUE).underlined();
         let link_width = usize::from(card.width.saturating_sub(4));
         if project.display_url.chars().count() > link_width {
             if let Some(split) = project.display_url.rfind('/') {
@@ -1049,31 +1090,15 @@ fn render_projects_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
 }
 
 fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
+    if let Some(article) = app.opened_article() {
+        render_open_article_panel(frame, area, app, article, compact);
+        return;
+    }
     frame.render_widget(Block::new().style(Style::new().bg(PANEL)), area);
-    let mut lines = vec![if app.opened_article().is_some() {
-        Line::from(vec![
-            Span::styled(
-                match (
-                    app.language(),
-                    app.hovered() == Some(HelpTarget::ArticleBack),
-                ) {
-                    (Language::En, false) => "← Back",
-                    (Language::En, true) => "← BACK",
-                    (Language::Ru, false) => "← Назад",
-                    (Language::Ru, true) => "← НАЗАД",
-                },
-                Style::new()
-                    .fg(Color::Rgb(143, 199, 242))
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-            Span::styled("   ● LOCAL  //  articles/", Style::new().fg(MUTED)),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("● LOCAL", Style::new().fg(INK).bold()),
-            Span::styled("  //  articles/", Style::new().fg(MUTED)),
-        ])
-    }];
+    let mut lines = vec![Line::from(vec![
+        Span::styled("● LOCAL", Style::new().fg(INK).bold()),
+        Span::styled("  //  articles/", Style::new().fg(MUTED)),
+    ])];
 
     if app.article_loading() {
         let loading_width = area.width.saturating_sub(if compact { 4 } else { 6 });
@@ -1101,50 +1126,6 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
             3,
             1.35,
         ));
-    } else if let Some(article) = app.opened_article() {
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            article.title.clone(),
-            Style::new().fg(INK).bold(),
-        )));
-        if !article.labels.is_empty() {
-            lines.push(Line::from(label_spans(&article.labels)));
-        }
-        lines.push(Line::default());
-        let focused_block = app.focused_code_block().map(|block| block.index);
-        let article_width = area.width.saturating_sub(if compact { 4 } else { 6 });
-        let code_block_width = article_width.saturating_sub(2);
-        lines.extend(markdown_lines_with_focus(
-            &article.markdown,
-            &article.images,
-            focused_block,
-            code_block_width,
-            app.article_animation_phase(),
-            app.hovered(),
-        ));
-        lines.push(Line::default());
-        let controls = match (app.language(), app.focused_code_block()) {
-            (Language::En, Some(block)) if block.executable() => {
-                "j/k scroll · p run · c copy · Esc back"
-            }
-            (Language::Ru, Some(block)) if block.executable() => {
-                "о/л скролл · з запуск · с копировать · Esc назад"
-            }
-            (Language::En, Some(block)) if !block.animated() => "j/k scroll · c copy · Esc back",
-            (Language::Ru, Some(block)) if !block.animated() => {
-                "о/л скролл · с копировать · Esc назад"
-            }
-            (Language::En, _) => "j/k or arrows scroll · Esc back",
-            (Language::Ru, _) => "о/л или стрелки — скролл · Esc назад",
-        };
-        lines.push(Line::from(Span::styled(
-            format!(
-                "-- READ --  {}/{}  {controls}",
-                app.article_cursor() + 1,
-                app.article_total_rows().max(1)
-            ),
-            Style::new().fg(MUTED),
-        )));
     } else if let Some(error) = app.articles_error() {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
@@ -1224,6 +1205,113 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
             .scroll((app.article_scroll(), 0))
             .wrap(Wrap { trim: false }),
         area,
+    );
+    paint_gradient_border(frame.buffer_mut(), area, INK, MID_GRAY);
+}
+
+fn render_open_article_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    article: &ArticleContent,
+    compact: bool,
+) {
+    frame.render_widget(Block::new().style(Style::new().bg(PANEL)), area);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Line::from(format!(" {} ", Tab::Articles.label(app.language()))).fg(INK));
+    frame.render_widget(block, area);
+
+    let horizontal_padding = if compact { 1 } else { 2 };
+    let bottom_padding = if compact { 0 } else { 1 };
+    let left = area.left().saturating_add(1 + horizontal_padding);
+    let right = area
+        .right()
+        .saturating_sub(1)
+        .saturating_sub(horizontal_padding);
+    let header_top = area.top().saturating_add(2);
+    let content_bottom = area
+        .bottom()
+        .saturating_sub(1)
+        .saturating_sub(bottom_padding);
+    let width = right.saturating_sub(left);
+
+    let back = match (
+        app.language(),
+        app.hovered() == Some(HelpTarget::ArticleBack),
+    ) {
+        (Language::En, false) => "← Back",
+        (Language::En, true) => "← BACK",
+        (Language::Ru, false) => "← Назад",
+        (Language::Ru, true) => "← НАЗАД",
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                back,
+                Style::new()
+                    .fg(LINK_BLUE)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
+            Span::styled("   ● LOCAL  //  articles/", Style::new().fg(MUTED)),
+        ]))
+        .style(Style::new().bg(PANEL)),
+        Rect::new(left, header_top, width, 1),
+    );
+
+    let mut lines = vec![Line::from(Span::styled(
+        article.title.clone(),
+        Style::new().fg(INK).bold(),
+    ))];
+    if !article.labels.is_empty() {
+        lines.push(Line::from(label_spans(&article.labels)));
+    }
+    lines.push(Line::default());
+    let focused_block = app.focused_code_block().map(|block| block.index);
+    let code_block_width = width.saturating_sub(2);
+    lines.extend(markdown_lines_with_focus(
+        &article.markdown,
+        &article.images,
+        focused_block,
+        code_block_width,
+        app.article_animation_phase(),
+        app.hovered(),
+    ));
+    lines.push(Line::default());
+    let controls = match (app.language(), app.focused_code_block()) {
+        (Language::En, Some(block)) if block.executable() => {
+            "j/k scroll · p run · c copy · Esc back"
+        }
+        (Language::Ru, Some(block)) if block.executable() => {
+            "о/л скролл · з запуск · с копировать · Esc назад"
+        }
+        (Language::En, Some(block)) if !block.animated() => "j/k scroll · c copy · Esc back",
+        (Language::Ru, Some(block)) if !block.animated() => "о/л скролл · с копировать · Esc назад",
+        (Language::En, _) => "j/k or arrows scroll · Esc back",
+        (Language::Ru, _) => "о/л или стрелки — скролл · Esc назад",
+    };
+    lines.push(Line::from(Span::styled(
+        format!(
+            "-- READ --  {}/{}  {controls}",
+            app.article_cursor() + 1,
+            app.article_total_rows().max(1)
+        ),
+        Style::new().fg(MUTED),
+    )));
+
+    let body_top = header_top.saturating_add(1);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .scroll((app.article_scroll(), 0))
+            .style(Style::new().bg(PANEL))
+            .wrap(Wrap { trim: false }),
+        Rect::new(
+            left,
+            body_top,
+            width,
+            content_bottom.saturating_sub(body_top),
+        ),
     );
     paint_gradient_border(frame.buffer_mut(), area, INK, MID_GRAY);
 }
@@ -2499,6 +2587,88 @@ mod tests {
             help_target_at(area, resume.left(), resume.top(), &info_app),
             Some(svetsec_core::HelpTarget::Resume)
         );
+    }
+
+    #[test]
+    fn article_back_link_stays_rendered_after_scrolling() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "long".into(),
+            title: "Long article".into(),
+            markdown: (0..40)
+                .map(|index| format!("line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        app.set_article_viewport_rows(article_viewport_rows(area));
+        let _ = app.update(Message::SetArticleScroll(20));
+
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let back = article_back_area(area, &app).expect("back target");
+        let rendered = (back.left()..back.right())
+            .map(|x| terminal.backend().buffer()[(x, back.top())].symbol())
+            .collect::<String>();
+        assert_eq!(rendered, "← Back");
+        assert!(app.article_scroll() > 0);
+    }
+
+    #[test]
+    fn browser_image_placements_keep_their_identity_while_scrolling() {
+        let area = Rect::new(0, 0, 100, 24);
+        let image = |source: &str| ArticleImage {
+            source: source.into(),
+            alt: source.into(),
+            width: 16,
+            height: 16,
+            pixels: vec![0; 16 * 16 * 3],
+        };
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "gallery".into(),
+            title: "Gallery".into(),
+            markdown: format!(
+                "![First](assets/first.jpg)\n{}\n![Second](assets/second.jpg)",
+                (0..30)
+                    .map(|index| format!("line {index}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            images: vec![image("assets/first.jpg"), image("assets/second.jpg")],
+            labels: Vec::new(),
+        });
+        app.set_article_viewport_rows(article_viewport_rows(area));
+
+        let before = native_image_placements(area, &app);
+        assert_eq!(
+            before
+                .iter()
+                .map(|placement| (placement.key, placement.source))
+                .collect::<Vec<_>>(),
+            vec![(0, "assets/first.jpg"), (1, "assets/second.jpg")]
+        );
+        let before_y = before
+            .iter()
+            .map(|placement| placement.y)
+            .collect::<Vec<_>>();
+        drop(before);
+        let _ = app.update(Message::SetArticleScroll(24));
+        let after = native_image_placements(area, &app);
+        assert_eq!(
+            after
+                .iter()
+                .map(|placement| (placement.key, placement.source))
+                .collect::<Vec<_>>(),
+            vec![(0, "assets/first.jpg"), (1, "assets/second.jpg")]
+        );
+        assert_eq!(before_y[0] - after[0].y, i32::from(app.article_scroll()));
+        assert_eq!(before_y[1] - after[1].y, i32::from(app.article_scroll()));
     }
 
     #[test]

@@ -10,7 +10,7 @@
       name="description"
       content="svetsec.ru — a personal site about security, Rust, and systems."
     />
-    <meta name="theme-color" content="#070a0e" />
+    <meta name="theme-color" content="#f8f9fb" />
     <link data-trunk rel="rust" data-no-minify />
     <link
       data-trunk
@@ -27,9 +27,9 @@
     <title>svetsec.ru</title>
     <style>
       :root {
-        color-scheme: dark;
+        color-scheme: light;
         font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        background: #070a0e;
+        background: #f8f9fb;
       }
 
       * {
@@ -42,7 +42,7 @@
         height: 100%;
         margin: 0;
         overflow: hidden;
-        background: #070a0e;
+        background: #f8f9fb;
         overscroll-behavior: none;
       }
 
@@ -68,21 +68,21 @@
         min-width: 0;
         min-height: 0;
         overflow: hidden;
-        background: #070a0e;
+        background: #f8f9fb;
       }
 
       #terminal_ratzilla_grid {
         width: 100%;
         height: 100%;
         overflow: hidden;
-        background: #070a0e;
+        background: #f8f9fb;
       }
 
       #terminal[data-native-scroll="true"] {
         overflow-x: hidden;
         overflow-y: auto;
         overscroll-behavior-y: contain;
-        scrollbar-color: #526170 #0d131b;
+        scrollbar-color: #94989a #f5f6f4;
         scrollbar-width: thin;
         touch-action: pan-y;
       }
@@ -113,8 +113,15 @@
         position: fixed;
         object-fit: contain;
         object-position: left top;
-        background: #0d131b;
+        background: #fff;
         image-rendering: auto;
+      }
+
+      #terminal_ratzilla_grid > pre > span.web-native-image-cell {
+        color: transparent !important;
+        background: #fff !important;
+        user-select: none !important;
+        -webkit-user-select: none !important;
       }
 
       #terminal > pre,
@@ -131,7 +138,7 @@
         margin: 0;
         overflow: hidden;
         outline: none;
-        color: #e6edf3;
+        color: #181a1c;
         touch-action: manipulation;
         -webkit-tap-highlight-color: transparent;
       }
@@ -171,13 +178,13 @@
       }
 
       #terminal_ratzilla_grid > pre span::selection {
-        color: #f7fbff;
+        color: #fff;
         background: #315d82;
       }
 
       .web-tab-cell {
-        background: #111923 !important;
-        color: #8e9baa !important;
+        background: #f5f6f4 !important;
+        color: #696d70 !important;
         cursor: pointer;
         user-select: none;
         -webkit-user-select: none;
@@ -188,8 +195,8 @@
       }
 
       .web-tab-hovered {
-        background: #1c2a36 !important;
-        color: #e6edf3 !important;
+        background: #e8e9e7 !important;
+        color: #181a1c !important;
         filter: brightness(1.08);
       }
 
@@ -227,7 +234,7 @@
       }
 
       .web-code-copy {
-        background: #253442 !important;
+        background: #46515c !important;
       }
 
       .web-code-run:hover,
@@ -255,14 +262,14 @@
       }
 
       .web-article-link:hover {
-        background: #1c2a36 !important;
-        color: #e6edf3 !important;
+        background: #e8e9e7 !important;
+        color: #181a1c !important;
         filter: brightness(1.08);
       }
 
       .web-project-card:hover {
-        background: #182433 !important;
-        color: #f7fbff !important;
+        background: #f0f2f4 !important;
+        color: #181a1c !important;
         filter: brightness(1.08);
       }
 
@@ -273,15 +280,15 @@
 
       .web-back-link,
       .web-resume-link {
-        color: #8fc7f2 !important;
+        color: #1c649f !important;
         text-decoration: underline;
         text-underline-offset: 0.18em;
       }
 
       .web-back-link:hover,
       .web-resume-link:hover {
-        color: #d8eeff !important;
-        background: #1c2a36 !important;
+        color: #0d416b !important;
+        background: #e8e9e7 !important;
       }
 
       #mobile-controls {
@@ -328,13 +335,13 @@
         #mobile-controls a {
           min-width: 0;
           min-height: 48px;
-          border: 1px solid #526170;
+          border: 1px solid #94989a;
           border-radius: 14px;
-          color: #e6edf3;
-          background: rgb(17 25 35 / 94%);
+          color: #181a1c;
+          background: rgb(255 255 255 / 96%);
           font: 700 13px/1 "SFMono-Regular", Consolas, "Liberation Mono",
             monospace;
-          box-shadow: 0 8px 26px rgb(0 0 0 / 35%);
+          box-shadow: 0 8px 26px rgb(24 26 28 / 16%);
           display: flex;
           align-items: center;
           justify-content: center;
@@ -363,6 +370,7 @@
         #mobile-controls button:active,
         #mobile-controls a:active {
           background: #315d82;
+          color: #fff;
           transform: translateY(1px);
         }
       }

@@ -954,11 +954,7 @@ impl App {
         let article = self.opened_article.as_ref()?;
         let raw_blocks = markdown_code_blocks(&article.markdown);
         let mut code_blocks = Vec::new();
-        let mut rows = vec![
-            "● LOCAL  //  articles/".to_owned(),
-            String::new(),
-            article.title.clone(),
-        ];
+        let mut rows = vec![article.title.clone()];
         if !article.labels.is_empty() {
             rows.push(
                 article
@@ -974,7 +970,7 @@ impl App {
             );
         }
         rows.push(String::new());
-        let cursor_start = 2;
+        let cursor_start = 0;
         let mut front_matter = false;
         let mut active_block = None::<(usize, u16, bool)>;
         let mut block_index = 0_usize;
@@ -1265,7 +1261,9 @@ mod tests {
         assert!(app.opened_article().is_some());
         assert_eq!(app.selected_article().unwrap().labels, ["Python"]);
         app.set_article_viewport_rows(3);
-        let _ = app.update(Message::ScrollArticleDown);
+        for _ in 0..3 {
+            let _ = app.update(Message::ScrollArticleDown);
+        }
         assert_eq!(app.article_scroll(), 1);
         let _ = app.update(Message::CloseArticle);
         assert!(app.opened_article().is_none());
@@ -1371,12 +1369,12 @@ mod tests {
         });
         app.set_article_viewport_rows(4);
 
-        let _ = app.update(Message::SelectArticlePosition { row: 4, column: 6 });
+        let _ = app.update(Message::SelectArticlePosition { row: 2, column: 6 });
+        assert_eq!((app.article_cursor(), app.article_cursor_column()), (2, 6));
+        let _ = app.update(Message::ScrollArticleDown);
+        assert_eq!((app.article_cursor(), app.article_cursor_column()), (3, 0));
+        let _ = app.update(Message::ScrollArticleDown);
         assert_eq!((app.article_cursor(), app.article_cursor_column()), (4, 6));
-        let _ = app.update(Message::ScrollArticleDown);
-        assert_eq!((app.article_cursor(), app.article_cursor_column()), (5, 0));
-        let _ = app.update(Message::ScrollArticleDown);
-        assert_eq!((app.article_cursor(), app.article_cursor_column()), (6, 6));
 
         let _ = app.update(Message::MoveArticleCursorLeft);
         assert_eq!(app.article_cursor_column(), 5);
