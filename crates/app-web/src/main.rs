@@ -359,6 +359,7 @@ fn reset_browser_transition_dom(image_ids: &RefCell<Vec<String>>) -> Result<(), 
         .ok_or_else(|| JsValue::from_str("document unavailable"))?;
     if let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") {
         grid.remove_attribute("data-block-selection")?;
+        clear_browser_grid_scroll_offset(&grid)?;
         let decorated = grid.query_selector_all("span[class], span[data-text-block]")?;
         for index in 0..decorated.length() {
             if let Some(node) = decorated.item(index)
@@ -581,6 +582,9 @@ fn sync_browser_native_scroll(app: &App) -> Result<(), JsValue> {
     if !article_open {
         terminal.remove_attribute("data-native-scroll")?;
         terminal.set_scroll_top(0);
+        if let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") {
+            clear_browser_grid_scroll_offset(&grid)?;
+        }
         if let Some(spacer) = document.get_element_by_id("web-article-scroll-spacer") {
             spacer.remove();
         }
@@ -620,6 +624,25 @@ fn sync_browser_native_scroll(app: &App) -> Result<(), JsValue> {
     if (f64::from(terminal.scroll_top()) - desired).abs() >= 1.0 {
         terminal.set_scroll_top(desired.round() as i32);
     }
+    set_browser_grid_scroll_offset(&grid, desired.round())?;
+    Ok(())
+}
+
+fn set_browser_grid_scroll_offset(grid: &web_sys::Element, scroll_top: f64) -> Result<(), JsValue> {
+    let Some(grid) = grid.dyn_ref::<web_sys::HtmlElement>() else {
+        return Ok(());
+    };
+    grid.style().set_property(
+        "--article-scroll-offset",
+        &format!("{}px", scroll_top.max(0.0)),
+    )
+}
+
+fn clear_browser_grid_scroll_offset(grid: &web_sys::Element) -> Result<(), JsValue> {
+    let Some(grid) = grid.dyn_ref::<web_sys::HtmlElement>() else {
+        return Ok(());
+    };
+    grid.style().remove_property("--article-scroll-offset")?;
     Ok(())
 }
 
@@ -879,13 +902,14 @@ fn install_browser_events(
         if row_height <= 0.0 {
             return;
         }
-        let row = (f64::from(scroll_terminal.scroll_top().max(0)) / row_height).round() as u16;
+        let scroll_top = f64::from(scroll_terminal.scroll_top().max(0));
+        let _ = set_browser_grid_scroll_offset(&grid, scroll_top);
+        let row = (scroll_top / row_height).round() as u16;
         let _ = scroll_app
             .borrow_mut()
             .update(Message::SetArticleScroll(row));
         if let Some(document) = web_sys::window().and_then(|window| window.document()) {
-            let _ =
-                position_browser_images(&document, f64::from(scroll_terminal.scroll_top().max(0)));
+            let _ = position_browser_images(&document, scroll_top);
         }
     });
     terminal.add_event_listener_with_callback("scroll", scroll.as_ref().unchecked_ref())?;
@@ -2458,6 +2482,13 @@ mod tests {
         app.begin_article_load();
         let loading = DomSignature::new(area, &app);
         assert!(structural_dom_transition(&hovered, &loading));
+    }
+
+    #[test]
+    fn native_scroll_keeps_the_text_grid_out_of_a_sticky_compositor_layer() {
+        let html = include_str!("../index.html");
+        assert!(!html.contains("position: sticky"));
+        assert!(html.contains("top: var(--article-scroll-offset, 0px)"));
     }
 
     #[test]

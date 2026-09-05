@@ -88,9 +88,8 @@
       }
 
       #terminal[data-native-scroll="true"] #terminal_ratzilla_grid {
-        position: sticky;
-        z-index: 1;
-        top: 0;
+        position: relative;
+        top: var(--article-scroll-offset, 0px);
         left: 0;
       }
 
