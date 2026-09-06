@@ -663,11 +663,15 @@ fn sync_browser_native_scroll(app: &App) -> Result<(), JsValue> {
         ),
     )?;
 
-    let desired = f64::from(app.article_scroll()) * row_height;
+    let desired = rendered_scroll_top(app.article_scroll(), row_height);
     if (f64::from(terminal.scroll_top()) - desired).abs() >= 1.0 {
         terminal.set_scroll_top(desired.round() as i32);
     }
     Ok(())
+}
+
+fn rendered_scroll_top(article_scroll: u16, row_height: f64) -> f64 {
+    f64::from(article_scroll) * row_height
 }
 
 fn sync_browser_output_close(
@@ -931,9 +935,6 @@ fn install_browser_events(
         let _ = scroll_app
             .borrow_mut()
             .update(Message::SetArticleScroll(row));
-        if let Some(document) = web_sys::window().and_then(|window| window.document()) {
-            let _ = position_browser_images(&document, scroll_top);
-        }
     });
     terminal.add_event_listener_with_callback("scroll", scroll.as_ref().unchecked_ref())?;
     scroll.forget();
@@ -1454,10 +1455,10 @@ fn sync_browser_images(
     clear_cell_class(&grid, ".web-native-image-cell")?;
     let viewport = svetsec_ui::native_image_viewport(area, app);
     let article_open = app.selected() == Tab::Articles && app.opened_article().is_some();
+    // Ratatui advances text in whole terminal rows. Keep native images on the
+    // same rendered row instead of moving them for every fractional wheel delta.
     let scroll_top = if article_open {
-        document
-            .get_element_by_id("terminal")
-            .map_or(0.0, |terminal| f64::from(terminal.scroll_top().max(0)))
+        rendered_scroll_top(app.article_scroll(), row_height)
     } else {
         0.0
     };
@@ -1780,7 +1781,13 @@ fn install_account_events(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
                     hide_modal("auth-modal");
                     refresh_comment_modal(&app);
                 }
-                Err(error) => set_modal_error("auth-error", &js_error_message(&error)),
+                Err(error) => {
+                    let language = app.borrow().language();
+                    set_modal_error(
+                        "auth-error",
+                        &localized_account_error(&js_error_message(&error), language),
+                    );
+                }
             }
         });
     });
@@ -1896,6 +1903,13 @@ fn show_auth_modal(owner: bool, register: bool, language: svetsec_core::Language
             "current-password"
         });
     }
+    if let Some(username) = document
+        .get_element_by_id("auth-username")
+        .and_then(|input| input.dyn_into::<HtmlInputElement>().ok())
+    {
+        username.set_disabled(owner);
+        username.set_required(!owner);
+    }
     set_modal_error("auth-error", "");
     let _ = modal.remove_attribute("hidden");
     let focus = if owner {
@@ -1919,6 +1933,10 @@ fn localize_account_modals(document: &web_sys::Document, language: svetsec_core:
             ("auth-login", "Sign in"),
             ("auth-register", "Register"),
             ("auth-cancel", "Cancel"),
+            (
+                "auth-requirements",
+                "Username: 3–24 Latin letters, numbers, _ or -. Password: 8–128 characters. guest, owner, and svetsec are reserved.",
+            ),
             ("comment-title", "Comments"),
             ("comment-sign-in", "Sign in / register"),
             ("comment-message-label", "Message"),
@@ -1931,6 +1949,10 @@ fn localize_account_modals(document: &web_sys::Document, language: svetsec_core:
             ("auth-login", "Войти"),
             ("auth-register", "Регистрация"),
             ("auth-cancel", "Отмена"),
+            (
+                "auth-requirements",
+                "Имя: 3–24 латинских символа (A–Z, 0–9, _ или -). Пароль: 8–128 символов. guest, owner и svetsec зарезервированы.",
+            ),
             ("comment-title", "Комментарии"),
             ("comment-sign-in", "Войти / зарегистрироваться"),
             ("comment-message-label", "Сообщение"),
@@ -2112,6 +2134,24 @@ fn js_error_message(error: &JsValue) -> String {
     error
         .as_string()
         .unwrap_or_else(|| "Request failed. Try again.".into())
+}
+
+fn localized_account_error(message: &str, language: svetsec_core::Language) -> String {
+    if language == svetsec_core::Language::En {
+        return message.to_owned();
+    }
+    match message {
+        "username must use 3-24 Latin letters, numbers, _ or -" => {
+            "Имя должно содержать 3–24 латинских символа: буквы, цифры, _ или -.".into()
+        }
+        "username is reserved" => "Это имя зарезервировано.".into(),
+        "password must contain 8-128 characters" => {
+            "Пароль должен содержать от 8 до 128 символов.".into()
+        }
+        "username is already registered" => "Это имя уже зарегистрировано.".into(),
+        "invalid credentials" => "Неверное имя пользователя или пароль.".into(),
+        _ => message.to_owned(),
+    }
 }
 
 async fn fetch_session(
@@ -2472,8 +2512,8 @@ mod tests {
 
     use super::{
         DomSignature, WebRoute, browser_image_id, browser_image_url_at, browser_key_code,
-        cell_contains_selectable_text, grid_axis, grid_cell_axis, selection_runs,
-        structural_dom_transition,
+        cell_contains_selectable_text, grid_axis, grid_cell_axis, localized_account_error,
+        rendered_scroll_top, selection_runs, structural_dom_transition,
     };
 
     #[test]
@@ -2602,6 +2642,22 @@ mod tests {
         let html = include_str!("../index.html");
         assert!(html.contains("position: sticky"));
         assert!(html.contains("overflow-anchor: none"));
+        assert_eq!(rendered_scroll_top(3, 19.5), 58.5);
+    }
+
+    #[test]
+    fn reader_account_errors_explain_registration_requirements() {
+        assert_eq!(
+            localized_account_error("username is reserved", svetsec_core::Language::Ru),
+            "Это имя зарезервировано."
+        );
+        assert_eq!(
+            localized_account_error(
+                "password must contain 8-128 characters",
+                svetsec_core::Language::Ru
+            ),
+            "Пароль должен содержать от 8 до 128 символов."
+        );
     }
 
     #[test]

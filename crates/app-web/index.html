@@ -332,6 +332,13 @@
         font-weight: 700;
       }
 
+      .form-help {
+        margin: 8px 0 0;
+        color: #60656a;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
       .modal-card input,
       .modal-card textarea {
         width: 100%;
@@ -564,8 +571,11 @@
             id="auth-username"
             name="username"
             autocomplete="username"
+            autocapitalize="none"
+            spellcheck="false"
             minlength="3"
             maxlength="24"
+            pattern="[A-Za-z0-9_-]{3,24}"
           />
         </label>
         <label>
@@ -580,6 +590,9 @@
             required
           />
         </label>
+        <p id="auth-requirements" class="form-help reader-only">
+          Username: 3–24 Latin letters, numbers, _ or -. Password: 8–128 characters.
+        </p>
         <div class="modal-actions">
           <button id="auth-login" type="submit" data-auth-action="login">Sign in</button>
           <button id="auth-register" type="submit" class="reader-only" data-auth-action="register">Register</button>

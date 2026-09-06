@@ -511,16 +511,24 @@ fn validate_user(input: &UserLogin) -> Result<(), ApiError> {
     let username_valid = (3..=24).contains(&username.len())
         && username
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        && !matches!(
-            username.to_ascii_lowercase().as_str(),
-            "guest" | "owner" | "svetsec"
-        );
-    let password_length = input.password.chars().count();
-    if !username_valid || !(8..=128).contains(&password_length) {
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    if !username_valid {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
-            "username or password does not meet requirements",
+            "username must use 3-24 Latin letters, numbers, _ or -",
+        ));
+    }
+    if matches!(
+        username.to_ascii_lowercase().as_str(),
+        "guest" | "owner" | "svetsec"
+    ) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "username is reserved"));
+    }
+    let password_length = input.password.chars().count();
+    if !(8..=128).contains(&password_length) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "password must contain 8-128 characters",
         ));
     }
     Ok(())
@@ -633,20 +641,27 @@ mod tests {
             })
             .is_ok()
         );
-        assert!(
-            validate_user(&UserLogin {
-                username: "guest".into(),
-                password: "correct horse battery staple".into(),
-            })
-            .is_err()
+        let reserved = validate_user(&UserLogin {
+            username: "guest".into(),
+            password: "correct horse battery staple".into(),
+        })
+        .unwrap_err();
+        assert_eq!(reserved.1, "username is reserved");
+        let invalid_name = validate_user(&UserLogin {
+            username: "bad name".into(),
+            password: "password".into(),
+        })
+        .unwrap_err();
+        assert_eq!(
+            invalid_name.1,
+            "username must use 3-24 Latin letters, numbers, _ or -"
         );
-        assert!(
-            validate_user(&UserLogin {
-                username: "bad name".into(),
-                password: "password".into(),
-            })
-            .is_err()
-        );
+        let invalid_password = validate_user(&UserLogin {
+            username: "reader".into(),
+            password: "short".into(),
+        })
+        .unwrap_err();
+        assert_eq!(invalid_password.1, "password must contain 8-128 characters");
         assert!(validate_comment("A useful comment").is_ok());
         assert!(validate_comment("\u{1b}[31mterminal escape").is_err());
         assert!(validate_comment(&"x".repeat(1_001)).is_err());
