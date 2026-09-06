@@ -403,7 +403,6 @@ fn reset_browser_transition_dom(image_ids: &RefCell<Vec<String>>) -> Result<(), 
         .ok_or_else(|| JsValue::from_str("document unavailable"))?;
     if let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") {
         grid.remove_attribute("data-block-selection")?;
-        clear_browser_grid_scroll_offset(&grid)?;
         let decorated = grid.query_selector_all("span[class], span[data-text-block]")?;
         for index in 0..decorated.length() {
             if let Some(node) = decorated.item(index)
@@ -421,6 +420,9 @@ fn reset_browser_transition_dom(image_ids: &RefCell<Vec<String>>) -> Result<(), 
     if let Some(terminal) = document.get_element_by_id("terminal") {
         terminal.remove_attribute("data-native-scroll")?;
         terminal.set_scroll_top(0);
+    }
+    if let Some(window) = web_sys::window() {
+        window.scroll_to_with_x_and_y(0.0, 0.0);
     }
     if let Some(spacer) = document.get_element_by_id("web-article-scroll-spacer") {
         spacer.remove();
@@ -626,9 +628,6 @@ fn sync_browser_native_scroll(app: &App) -> Result<(), JsValue> {
     if !article_open {
         terminal.remove_attribute("data-native-scroll")?;
         terminal.set_scroll_top(0);
-        if let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") {
-            clear_browser_grid_scroll_offset(&grid)?;
-        }
         if let Some(spacer) = document.get_element_by_id("web-article-scroll-spacer") {
             spacer.remove();
         }
@@ -668,25 +667,6 @@ fn sync_browser_native_scroll(app: &App) -> Result<(), JsValue> {
     if (f64::from(terminal.scroll_top()) - desired).abs() >= 1.0 {
         terminal.set_scroll_top(desired.round() as i32);
     }
-    set_browser_grid_scroll_offset(&grid, desired.round())?;
-    Ok(())
-}
-
-fn set_browser_grid_scroll_offset(grid: &web_sys::Element, scroll_top: f64) -> Result<(), JsValue> {
-    let Some(grid) = grid.dyn_ref::<web_sys::HtmlElement>() else {
-        return Ok(());
-    };
-    grid.style().set_property(
-        "--article-scroll-offset",
-        &format!("{}px", scroll_top.max(0.0)),
-    )
-}
-
-fn clear_browser_grid_scroll_offset(grid: &web_sys::Element) -> Result<(), JsValue> {
-    let Some(grid) = grid.dyn_ref::<web_sys::HtmlElement>() else {
-        return Ok(());
-    };
-    grid.style().remove_property("--article-scroll-offset")?;
     Ok(())
 }
 
@@ -947,7 +927,6 @@ fn install_browser_events(
             return;
         }
         let scroll_top = f64::from(scroll_terminal.scroll_top().max(0));
-        let _ = set_browser_grid_scroll_offset(&grid, scroll_top);
         let row = (scroll_top / row_height).round() as u16;
         let _ = scroll_app
             .borrow_mut()
@@ -1359,6 +1338,14 @@ fn activate_at(
         let _ = ratzilla::utils::open_url("/resume", true);
         return;
     }
+    let image_url = {
+        let app = app.borrow();
+        browser_image_url_at(area, column, row, &app)
+    };
+    if let Some(image_url) = image_url {
+        let _ = ratzilla::utils::open_url(&image_url, true);
+        return;
+    }
     let project = {
         let app = app.borrow();
         svetsec_ui::project_at(area, column, row, &app)
@@ -1505,11 +1492,7 @@ fn sync_browser_images(
         let content_top = row_rect.top() + f64::from(viewport.top()) * row_height;
         let content_right = row_rect.left() + f64::from(viewport.right()) * cell_width;
         let content_bottom = row_rect.top() + f64::from(viewport.bottom()) * row_height;
-        let source = if placement.source.starts_with('/') {
-            placement.source.to_owned()
-        } else {
-            format!("/api/github/assets/{}", placement.source)
-        };
+        let source = browser_image_url(placement.source);
         if image.get_attribute("src").as_deref() != Some(&source) {
             image.set_attribute("src", &source)?;
         }
@@ -1565,6 +1548,39 @@ fn sync_browser_images(
     }
     *previous_ids.borrow_mut() = active_ids;
     Ok(())
+}
+
+fn browser_image_url_at(
+    area: ratzilla::ratatui::layout::Rect,
+    column: u16,
+    row: u16,
+    app: &App,
+) -> Option<String> {
+    svetsec_ui::native_image_placements(area, app)
+        .into_iter()
+        .find(|placement| {
+            let visible_height = placement
+                .height
+                .saturating_sub(placement.clip_top)
+                .saturating_sub(placement.clip_bottom);
+            let visible_width = placement.width.saturating_sub(placement.clip_right);
+            let visible_area = ratzilla::ratatui::layout::Rect::new(
+                placement.x.max(0) as u16,
+                (placement.y + i32::from(placement.clip_top)).max(0) as u16,
+                visible_width,
+                visible_height,
+            );
+            !visible_area.is_empty() && visible_area.contains((column, row).into())
+        })
+        .map(|placement| browser_image_url(placement.source))
+}
+
+fn browser_image_url(source: &str) -> String {
+    if source.starts_with('/') {
+        source.to_owned()
+    } else {
+        format!("/api/github/assets/{source}")
+    }
 }
 
 fn browser_image_id(key: usize, source: &str) -> String {
@@ -2452,11 +2468,12 @@ async fn request(method: &str, url: &str, body: Option<String>) -> Result<Respon
 mod tests {
     use ratzilla::event::KeyCode;
     use ratzilla::ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
-    use svetsec_core::{App, ArticleContent, Message, Tab};
+    use svetsec_core::{App, ArticleContent, ArticleImage, Message, Tab};
 
     use super::{
-        DomSignature, WebRoute, browser_image_id, browser_key_code, cell_contains_selectable_text,
-        grid_axis, grid_cell_axis, selection_runs, structural_dom_transition,
+        DomSignature, WebRoute, browser_image_id, browser_image_url_at, browser_key_code,
+        cell_contains_selectable_text, grid_axis, grid_cell_axis, selection_runs,
+        structural_dom_transition,
     };
 
     #[test]
@@ -2510,6 +2527,35 @@ mod tests {
     }
 
     #[test]
+    fn visible_article_images_are_openable_at_their_rendered_cells() {
+        let area = ratzilla::ratatui::layout::Rect::new(0, 0, 100, 40);
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "screenshot".into(),
+            title: "Screenshot".into(),
+            markdown: "![Screenshot](assets/screenshot.png)".into(),
+            images: vec![ArticleImage {
+                source: "assets/screenshot.png".into(),
+                alt: "Screenshot".into(),
+                width: 12,
+                height: 6,
+                pixels: Vec::new(),
+            }],
+            labels: Vec::new(),
+        });
+        let placement = svetsec_ui::native_image_placements(area, &app)[0];
+        let column = placement.x.max(0) as u16;
+        let row = (placement.y + i32::from(placement.clip_top)).max(0) as u16;
+
+        assert_eq!(
+            browser_image_url_at(area, column, row, &app).as_deref(),
+            Some("/api/github/assets/assets/screenshot.png")
+        );
+        assert_eq!(browser_image_url_at(area, 99, 39, &app), None);
+    }
+
+    #[test]
     fn full_redraw_restores_static_cells_after_backend_grid_reset() {
         let mut terminal = Terminal::new(TestBackend::new(12, 1)).unwrap();
         let render = |frame: &mut ratzilla::ratatui::Frame<'_>| {
@@ -2552,10 +2598,10 @@ mod tests {
     }
 
     #[test]
-    fn native_scroll_keeps_the_text_grid_out_of_a_sticky_compositor_layer() {
+    fn native_scroll_keeps_the_terminal_grid_stationary() {
         let html = include_str!("../index.html");
-        assert!(!html.contains("position: sticky"));
-        assert!(html.contains("top: var(--article-scroll-offset, 0px)"));
+        assert!(html.contains("position: sticky"));
+        assert!(html.contains("overflow-anchor: none"));
     }
 
     #[test]
