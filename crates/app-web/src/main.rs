@@ -5,7 +5,7 @@ use std::{
 };
 
 use gloo_timers::future::TimeoutFuture;
-use ratzilla::{DomBackend, WebRenderer, event::KeyCode, ratatui::Terminal};
+use ratzilla::{DomBackend, event::KeyCode, ratatui::Terminal};
 use svetsec_core::{
     App, ArticleContent, ArticleImage, ArticleSummary, Comment, Effect, HelpTarget, Message, Tab,
 };
@@ -288,7 +288,10 @@ fn main() -> io::Result<()> {
         resolving: matches!(initial_route, WebRoute::Article(_)),
     }));
     let backend = DomBackend::new_by_id("terminal")?;
-    let terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::new(backend)?;
+    let full_redraw_required = Rc::new(Cell::new(false));
+    install_full_redraw_on_resize(Rc::clone(&full_redraw_required))
+        .map_err(|error| io::Error::other(format!("resize recovery setup failed: {error:?}")))?;
     install_browser_events(Rc::clone(&app), Rc::clone(&viewport))
         .map_err(|error| io::Error::other(format!("browser event setup failed: {error:?}")))?;
     install_account_events(Rc::clone(&app))
@@ -300,47 +303,88 @@ fn main() -> io::Result<()> {
     animate_ui(Rc::clone(&app));
     apply_web_route(Rc::clone(&app), initial_route, Rc::clone(&route_state));
 
-    terminal.draw_web(move |frame| {
-        viewport.set(frame.area());
-        let app_handle = Rc::clone(&app);
-        let mut app = app.borrow_mut();
-        app.set_article_viewport_rows(svetsec_ui::article_viewport_rows(frame.area()));
-        let signature = DomSignature::new(frame.area(), &app);
-        let previous_signature = dom_signature.borrow();
-        let changed = previous_signature.as_ref() != Some(&signature);
-        let structural_transition = previous_signature
-            .as_ref()
-            .is_some_and(|previous| structural_dom_transition(previous, &signature));
-        drop(previous_signature);
-        if structural_transition {
-            let _ = reset_browser_transition_dom(&browser_image_ids);
+    let animation_frame = Rc::new(RefCell::new(None::<Closure<dyn FnMut()>>));
+    let next_animation_frame = Rc::clone(&animation_frame);
+    *animation_frame.borrow_mut() = Some(Closure::new(move || {
+        if full_redraw_required.replace(false) {
+            // DomBackend recreates every span after a resize, while Ratatui normally
+            // sends only cells that differ from its previous buffer. Resetting that
+            // buffer makes the rebuilt DOM receive static text as well as animation.
+            terminal
+                .clear()
+                .expect("the DOM terminal should support a full redraw");
+            *dom_signature.borrow_mut() = None;
         }
-        svetsec_ui::render(frame, &app);
-        sync_browser_route(&app, &route_state);
-        if changed {
-            *dom_signature.borrow_mut() = Some(signature);
-            let sync_app = Rc::clone(&app_handle);
-            let sync_image_ids = Rc::clone(&browser_image_ids);
-            let area = frame.area();
-            // `spawn_local` schedules this work for the next microtask. The DOM
-            // backend has finished writing the Ratatui cells by then, while the
-            // browser has not painted an undecorated intermediate frame yet.
-            spawn_local(async move {
-                let app = sync_app.borrow();
-                let _ = sync_browser_tabs(area, &app);
-                let _ = sync_browser_articles(area, &app);
-                let _ = sync_browser_projects(area, &app);
-                let _ = sync_browser_navigation_links(area, &app);
-                let _ = sync_browser_code_actions(area, &app);
-                let _ = sync_browser_output_close(area, &app);
-                let _ = sync_browser_comment_actions(area, &app);
-                let _ = sync_mobile_controls(&app);
-                let _ = sync_browser_native_scroll(&app);
-                let _ = sync_browser_images(&app, area, &sync_image_ids);
-                let _ = sync_browser_text_selection();
-            });
+
+        terminal
+            .draw(|frame| {
+                viewport.set(frame.area());
+                let app_handle = Rc::clone(&app);
+                let mut app = app.borrow_mut();
+                app.set_article_viewport_rows(svetsec_ui::article_viewport_rows(frame.area()));
+                let signature = DomSignature::new(frame.area(), &app);
+                let previous_signature = dom_signature.borrow();
+                let changed = previous_signature.as_ref() != Some(&signature);
+                let structural_transition = previous_signature
+                    .as_ref()
+                    .is_some_and(|previous| structural_dom_transition(previous, &signature));
+                drop(previous_signature);
+                if structural_transition {
+                    let _ = reset_browser_transition_dom(&browser_image_ids);
+                }
+                svetsec_ui::render(frame, &app);
+                sync_browser_route(&app, &route_state);
+                if changed {
+                    *dom_signature.borrow_mut() = Some(signature);
+                    let sync_app = Rc::clone(&app_handle);
+                    let sync_image_ids = Rc::clone(&browser_image_ids);
+                    let area = frame.area();
+                    // `spawn_local` schedules this work for the next microtask. The DOM
+                    // backend has finished writing the Ratatui cells by then, while the
+                    // browser has not painted an undecorated intermediate frame yet.
+                    spawn_local(async move {
+                        let app = sync_app.borrow();
+                        let _ = sync_browser_tabs(area, &app);
+                        let _ = sync_browser_articles(area, &app);
+                        let _ = sync_browser_projects(area, &app);
+                        let _ = sync_browser_navigation_links(area, &app);
+                        let _ = sync_browser_code_actions(area, &app);
+                        let _ = sync_browser_output_close(area, &app);
+                        let _ = sync_browser_comment_actions(area, &app);
+                        let _ = sync_mobile_controls(&app);
+                        let _ = sync_browser_native_scroll(&app);
+                        let _ = sync_browser_images(&app, area, &sync_image_ids);
+                        let _ = sync_browser_text_selection();
+                    });
+                }
+            })
+            .expect("the DOM terminal should render an animation frame");
+
+        if let Some(callback) = next_animation_frame.borrow().as_ref()
+            && let Some(window) = web_sys::window()
+        {
+            let _ = window.request_animation_frame(callback.as_ref().unchecked_ref());
         }
+    }));
+
+    let window = web_sys::window().ok_or_else(|| io::Error::other("window unavailable"))?;
+    let animation_frame_ref = animation_frame.borrow();
+    let callback = animation_frame_ref
+        .as_ref()
+        .ok_or_else(|| io::Error::other("animation callback unavailable"))?;
+    window
+        .request_animation_frame(callback.as_ref().unchecked_ref())
+        .map_err(|error| io::Error::other(format!("animation setup failed: {error:?}")))?;
+    Ok(())
+}
+
+fn install_full_redraw_on_resize(redraw_required: Rc<Cell<bool>>) -> Result<(), JsValue> {
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("window unavailable"))?;
+    let resize = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+        redraw_required.set(true);
     });
+    window.add_event_listener_with_callback("resize", resize.as_ref().unchecked_ref())?;
+    resize.forget();
     Ok(())
 }
 
@@ -2407,6 +2451,7 @@ async fn request(method: &str, url: &str, body: Option<String>) -> Result<Respon
 #[cfg(test)]
 mod tests {
     use ratzilla::event::KeyCode;
+    use ratzilla::ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
     use svetsec_core::{App, ArticleContent, Message, Tab};
 
     use super::{
@@ -2462,6 +2507,28 @@ mod tests {
         assert_eq!(first, browser_image_id(0, "assets/first.jpg"));
         assert_ne!(first, browser_image_id(1, "assets/first.jpg"));
         assert_ne!(first, browser_image_id(0, "assets/second.jpg"));
+    }
+
+    #[test]
+    fn full_redraw_restores_static_cells_after_backend_grid_reset() {
+        let mut terminal = Terminal::new(TestBackend::new(12, 1)).unwrap();
+        let render = |frame: &mut ratzilla::ratatui::Frame<'_>| {
+            frame.render_widget(Paragraph::new("STATIC"), frame.area());
+        };
+
+        terminal.draw(render).unwrap();
+        assert_eq!(terminal.backend().buffer()[(0, 0)].symbol(), "S");
+
+        // Recreate a same-sized, blank backend surface. Ratatui does not notice a
+        // size change and therefore sends no unchanged text on the following draw.
+        terminal.backend_mut().resize(0, 0);
+        terminal.backend_mut().resize(12, 1);
+        terminal.draw(render).unwrap();
+        assert_eq!(terminal.backend().buffer()[(0, 0)].symbol(), " ");
+
+        terminal.clear().unwrap();
+        terminal.draw(render).unwrap();
+        assert_eq!(terminal.backend().buffer()[(0, 0)].symbol(), "S");
     }
 
     #[test]
