@@ -42,6 +42,16 @@ struct DomSignature {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct RenderSignature {
+    dom: DomSignature,
+    selected_article: usize,
+    skeleton_phase: u16,
+    article_animation_phase: u16,
+    awaiting_site_key: bool,
+    awaiting_article_g: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum WebRoute {
     Main,
     Articles,
@@ -139,6 +149,19 @@ impl DomSignature {
                 .map_or(usize::from(app.profile_image().is_some()), |article| {
                     article.images.len()
                 }),
+        }
+    }
+}
+
+impl RenderSignature {
+    fn new(area: ratzilla::ratatui::layout::Rect, app: &App) -> Self {
+        Self {
+            dom: DomSignature::new(area, app),
+            selected_article: app.selected_article_index(),
+            skeleton_phase: app.skeleton_phase(),
+            article_animation_phase: app.article_animation_phase(),
+            awaiting_site_key: app.awaiting_site_key(),
+            awaiting_article_g: app.awaiting_article_g(),
         }
     }
 }
@@ -283,6 +306,8 @@ fn main() -> io::Result<()> {
     let viewport = Rc::new(Cell::new(ratzilla::ratatui::layout::Rect::default()));
     let browser_image_ids = Rc::new(RefCell::new(Vec::<String>::new()));
     let dom_signature = Rc::new(RefCell::new(None::<DomSignature>));
+    let render_signature = Rc::new(RefCell::new(None::<RenderSignature>));
+    let scroll_settle_generation = Rc::new(Cell::new(0_u32));
     let route_state = Rc::new(RefCell::new(RouteState {
         current: initial_route.clone(),
         resolving: matches!(initial_route, WebRoute::Article(_)),
@@ -292,8 +317,13 @@ fn main() -> io::Result<()> {
     let full_redraw_required = Rc::new(Cell::new(false));
     install_full_redraw_on_resize(Rc::clone(&full_redraw_required))
         .map_err(|error| io::Error::other(format!("resize recovery setup failed: {error:?}")))?;
-    install_browser_events(Rc::clone(&app), Rc::clone(&viewport))
-        .map_err(|error| io::Error::other(format!("browser event setup failed: {error:?}")))?;
+    install_browser_events(
+        Rc::clone(&app),
+        Rc::clone(&viewport),
+        Rc::clone(&browser_image_ids),
+        Rc::clone(&scroll_settle_generation),
+    )
+    .map_err(|error| io::Error::other(format!("browser event setup failed: {error:?}")))?;
     install_account_events(Rc::clone(&app))
         .map_err(|error| io::Error::other(format!("account event setup failed: {error:?}")))?;
     install_route_events(Rc::clone(&app), Rc::clone(&route_state))
@@ -314,51 +344,73 @@ fn main() -> io::Result<()> {
                 .clear()
                 .expect("the DOM terminal should support a full redraw");
             *dom_signature.borrow_mut() = None;
+            *render_signature.borrow_mut() = None;
         }
 
-        terminal
-            .draw(|frame| {
-                viewport.set(frame.area());
-                let app_handle = Rc::clone(&app);
-                let mut app = app.borrow_mut();
-                app.set_article_viewport_rows(svetsec_ui::article_viewport_rows(frame.area()));
-                let signature = DomSignature::new(frame.area(), &app);
-                let previous_signature = dom_signature.borrow();
-                let changed = previous_signature.as_ref() != Some(&signature);
-                let structural_transition = previous_signature
-                    .as_ref()
-                    .is_some_and(|previous| structural_dom_transition(previous, &signature));
-                drop(previous_signature);
-                if structural_transition {
-                    let _ = reset_browser_transition_dom(&browser_image_ids);
-                }
-                svetsec_ui::render(frame, &app);
-                sync_browser_route(&app, &route_state);
-                if changed {
-                    *dom_signature.borrow_mut() = Some(signature);
-                    let sync_app = Rc::clone(&app_handle);
-                    let sync_image_ids = Rc::clone(&browser_image_ids);
-                    let area = frame.area();
-                    // `spawn_local` schedules this work for the next microtask. The DOM
-                    // backend has finished writing the Ratatui cells by then, while the
-                    // browser has not painted an undecorated intermediate frame yet.
-                    spawn_local(async move {
-                        let app = sync_app.borrow();
-                        let _ = sync_browser_tabs(area, &app);
-                        let _ = sync_browser_articles(area, &app);
-                        let _ = sync_browser_projects(area, &app);
-                        let _ = sync_browser_navigation_links(area, &app);
-                        let _ = sync_browser_code_actions(area, &app);
-                        let _ = sync_browser_output_close(area, &app);
-                        let _ = sync_browser_comment_actions(area, &app);
-                        let _ = sync_mobile_controls(&app);
-                        let _ = sync_browser_native_scroll(&app);
-                        let _ = sync_browser_images(&app, area, &sync_image_ids);
-                        let _ = sync_browser_text_selection();
-                    });
-                }
-            })
-            .expect("the DOM terminal should render an animation frame");
+        let render_required = {
+            let app = app.borrow();
+            let next = RenderSignature::new(viewport.get(), &app);
+            render_signature.borrow().as_ref() != Some(&next)
+        };
+        if render_required {
+            terminal
+                .draw(|frame| {
+                    viewport.set(frame.area());
+                    let app_handle = Rc::clone(&app);
+                    let mut app = app.borrow_mut();
+                    app.set_article_viewport_rows(svetsec_ui::article_viewport_rows(frame.area()));
+                    let next_render_signature = RenderSignature::new(frame.area(), &app);
+                    let signature = next_render_signature.dom.clone();
+                    let previous_signature = dom_signature.borrow();
+                    let changed = previous_signature.as_ref() != Some(&signature);
+                    let structural_transition = previous_signature
+                        .as_ref()
+                        .is_some_and(|previous| structural_dom_transition(previous, &signature));
+                    let navigation_only_transition =
+                        previous_signature.as_ref().is_some_and(|previous| {
+                            article_navigation_only_transition(previous, &signature)
+                        });
+                    drop(previous_signature);
+                    if structural_transition {
+                        let _ = reset_browser_transition_dom(&browser_image_ids);
+                    }
+                    svetsec_ui::render(frame, &app);
+                    sync_browser_route(&app, &route_state);
+                    if changed {
+                        *dom_signature.borrow_mut() = Some(signature);
+                        let sync_app = Rc::clone(&app_handle);
+                        let sync_image_ids = Rc::clone(&browser_image_ids);
+                        let area = frame.area();
+                        // `spawn_local` schedules this work for the next microtask. The DOM
+                        // backend has finished writing the Ratatui cells by then, while the
+                        // browser has not painted an undecorated intermediate frame yet.
+                        spawn_local(async move {
+                            let app = sync_app.borrow();
+                            if !navigation_only_transition {
+                                let _ = sync_browser_tabs(area, &app);
+                                let _ = sync_browser_articles(area, &app);
+                                let _ = sync_browser_projects(area, &app);
+                                let _ = sync_browser_navigation_links(area, &app);
+                            }
+                            let _ = sync_browser_code_actions(area, &app);
+                            if !navigation_only_transition {
+                                let _ = sync_browser_output_close(area, &app);
+                                let _ = sync_browser_comment_actions(area, &app);
+                                let _ = sync_mobile_controls(&app);
+                            }
+                            let _ = sync_browser_native_scroll(area, &app);
+                            if navigation_only_transition {
+                                let _ = sync_browser_image_positions();
+                            } else {
+                                let _ = sync_browser_images(&app, area, &sync_image_ids);
+                                let _ = sync_browser_text_selection();
+                            }
+                        });
+                    }
+                    *render_signature.borrow_mut() = Some(next_render_signature);
+                })
+                .expect("the DOM terminal should render an animation frame");
+        }
 
         if let Some(callback) = next_animation_frame.borrow().as_ref()
             && let Some(window) = web_sys::window()
@@ -397,11 +449,34 @@ fn structural_dom_transition(previous: &DomSignature, next: &DomSignature) -> bo
         || previous.opened_slug != next.opened_slug
 }
 
+fn article_navigation_only_transition(previous: &DomSignature, next: &DomSignature) -> bool {
+    if previous.selected != Tab::Articles
+        || previous.opened_slug.is_none()
+        || previous.article_loading
+    {
+        return false;
+    }
+
+    let navigation_changed = previous.article_scroll != next.article_scroll
+        || previous.article_cursor != next.article_cursor
+        || previous.article_cursor_column != next.article_cursor_column;
+    let mut previous = previous.clone();
+    let mut next = next.clone();
+    previous.article_scroll = 0;
+    previous.article_cursor = 0;
+    previous.article_cursor_column = 0;
+    next.article_scroll = 0;
+    next.article_cursor = 0;
+    next.article_cursor_column = 0;
+    navigation_changed && previous == next
+}
+
 fn reset_browser_transition_dom(image_ids: &RefCell<Vec<String>>) -> Result<(), JsValue> {
     let document = web_sys::window()
         .and_then(|window| window.document())
         .ok_or_else(|| JsValue::from_str("document unavailable"))?;
     if let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") {
+        reset_browser_article_scroll_rows(&grid)?;
         grid.remove_attribute("data-block-selection")?;
         let decorated = grid.query_selector_all("span[class], span[data-text-block]")?;
         for index in 0..decorated.length() {
@@ -430,6 +505,41 @@ fn reset_browser_transition_dom(image_ids: &RefCell<Vec<String>>) -> Result<(), 
     Ok(())
 }
 
+fn reset_browser_article_scroll_rows(grid: &web_sys::Element) -> Result<(), JsValue> {
+    let wrappers = grid.query_selector_all(".web-article-scroll-row")?;
+    for index in 0..wrappers.length() {
+        let Some(node) = wrappers.item(index) else {
+            continue;
+        };
+        let Some(wrapper) = node.dyn_ref::<web_sys::Element>() else {
+            continue;
+        };
+        let Some(parent) = wrapper.parent_node() else {
+            continue;
+        };
+        while let Some(child) = wrapper.first_child() {
+            parent.insert_before(&child, Some(wrapper))?;
+        }
+        parent.remove_child(wrapper)?;
+    }
+    let rows =
+        grid.query_selector_all("pre.web-article-scroll-line, pre.web-article-static-line")?;
+    for index in 0..rows.length() {
+        if let Some(node) = rows.item(index)
+            && let Some(row) = node.dyn_ref::<web_sys::Element>()
+        {
+            row.remove_attribute("class")?;
+            row.remove_attribute("data-terminal-row")?;
+        }
+    }
+    grid.remove_attribute("data-article-scroll-layout")?;
+    grid.remove_attribute("data-rendered-article-scroll")?;
+    if let Some(grid) = grid.dyn_ref::<web_sys::HtmlElement>() {
+        grid.style().remove_property("--article-scroll-offset")?;
+    }
+    Ok(())
+}
+
 fn sync_browser_tabs(area: ratzilla::ratatui::layout::Rect, app: &App) -> Result<(), JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("window unavailable"))?;
     let document = window
@@ -451,8 +561,7 @@ fn sync_browser_tabs(area: ratzilla::ratatui::layout::Rect, app: &App) -> Result
         };
         for row in tab.top()..tab.bottom() {
             for column in tab.left()..tab.right() {
-                let selector = format!("pre:nth-child({}) span:nth-child({})", row + 1, column + 1);
-                let Some(cell) = grid.query_selector(&selector)? else {
+                let Some(cell) = terminal_cell(&grid, row, column)? else {
                     continue;
                 };
                 let edge = if column == tab.left() {
@@ -494,12 +603,7 @@ fn sync_browser_code_actions(
             svetsec_ui::CodeBlockAction::Copy { .. } => "web-code-copy",
         };
         for column in area.left()..area.right() {
-            let selector = format!(
-                "pre:nth-child({}) span:nth-child({})",
-                area.top() + 1,
-                column + 1
-            );
-            let Some(cell) = grid.query_selector(&selector)? else {
+            let Some(cell) = terminal_cell(&grid, area.top(), column)? else {
                 continue;
             };
             let edge = if column == area.left() {
@@ -616,7 +720,10 @@ fn sync_mobile_controls(app: &App) -> Result<(), JsValue> {
     Ok(())
 }
 
-fn sync_browser_native_scroll(app: &App) -> Result<(), JsValue> {
+fn sync_browser_native_scroll(
+    area: ratzilla::ratatui::layout::Rect,
+    app: &App,
+) -> Result<(), JsValue> {
     let document = web_sys::window()
         .and_then(|window| window.document())
         .ok_or_else(|| JsValue::from_str("document unavailable"))?;
@@ -628,6 +735,9 @@ fn sync_browser_native_scroll(app: &App) -> Result<(), JsValue> {
     if !article_open {
         terminal.remove_attribute("data-native-scroll")?;
         terminal.set_scroll_top(0);
+        if let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") {
+            reset_browser_article_scroll_rows(&grid)?;
+        }
         if let Some(spacer) = document.get_element_by_id("web-article-scroll-spacer") {
             spacer.remove();
         }
@@ -638,13 +748,10 @@ fn sync_browser_native_scroll(app: &App) -> Result<(), JsValue> {
     let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
         return Ok(());
     };
-    let Some(first_row) = grid.query_selector("pre")? else {
+    let Some(row_height) = browser_terminal_row_height(&grid)? else {
         return Ok(());
     };
-    let row_height = first_row.get_bounding_client_rect().height();
-    if row_height <= 0.0 {
-        return Ok(());
-    }
+    ensure_browser_article_scroll_rows(&document, &grid, svetsec_ui::article_viewport_area(area))?;
 
     let spacer = match document.get_element_by_id("web-article-scroll-spacer") {
         Some(spacer) => spacer,
@@ -655,23 +762,138 @@ fn sync_browser_native_scroll(app: &App) -> Result<(), JsValue> {
             spacer
         }
     };
-    spacer.set_attribute(
-        "style",
-        &format!(
-            "height:{}px",
-            f64::from(app.article_scroll_limit()) * row_height
-        ),
-    )?;
-
-    let desired = rendered_scroll_top(app.article_scroll(), row_height);
-    if (f64::from(terminal.scroll_top()) - desired).abs() >= 1.0 {
-        terminal.set_scroll_top(desired.round() as i32);
+    let spacer_style = format!(
+        "height:{}px",
+        f64::from(app.article_scroll_limit()) * row_height
+    );
+    if spacer.get_attribute("style").as_deref() != Some(&spacer_style) {
+        spacer.set_attribute("style", &spacer_style)?;
     }
+
+    let mut scroll_top = f64::from(terminal.scroll_top().max(0));
+    if native_scroll_row(scroll_top, row_height, app.article_scroll_limit()) != app.article_scroll()
+    {
+        let desired = rendered_scroll_top(app.article_scroll(), row_height);
+        terminal.set_scroll_top(desired.round() as i32);
+        scroll_top = desired;
+    }
+    grid.set_attribute(
+        "data-rendered-article-scroll",
+        &app.article_scroll().to_string(),
+    )?;
+    apply_browser_article_scroll_offset(&grid, scroll_top, app.article_scroll(), row_height)?;
     Ok(())
 }
 
 fn rendered_scroll_top(article_scroll: u16, row_height: f64) -> f64 {
     f64::from(article_scroll) * row_height
+}
+
+fn browser_terminal_row_height(grid: &web_sys::Element) -> Result<Option<f64>, JsValue> {
+    if let Some(height) = grid
+        .get_attribute("data-terminal-row-height")
+        .and_then(|height| height.parse::<f64>().ok())
+        .filter(|height| *height > 0.0)
+    {
+        return Ok(Some(height));
+    }
+    let Some(first_row) = grid.query_selector("pre")? else {
+        return Ok(None);
+    };
+    let height = first_row.get_bounding_client_rect().height();
+    if height <= 0.0 {
+        return Ok(None);
+    }
+    grid.set_attribute("data-terminal-row-height", &height.to_string())?;
+    Ok(Some(height))
+}
+
+fn native_scroll_row(scroll_top: f64, row_height: f64, limit: u16) -> u16 {
+    if row_height <= 0.0 {
+        return 0;
+    }
+    ((scroll_top.max(0.0) / row_height).floor() as u16).min(limit)
+}
+
+fn article_scroll_offset(scroll_top: f64, rendered_row: u16, row_height: f64) -> f64 {
+    if row_height <= 0.0 {
+        return 0.0;
+    }
+    (scroll_top - rendered_scroll_top(rendered_row, row_height)).clamp(-row_height, row_height)
+}
+
+fn apply_browser_article_scroll_offset(
+    grid: &web_sys::Element,
+    scroll_top: f64,
+    rendered_row: u16,
+    row_height: f64,
+) -> Result<(), JsValue> {
+    let Some(grid) = grid.dyn_ref::<web_sys::HtmlElement>() else {
+        return Ok(());
+    };
+    let offset = -article_scroll_offset(scroll_top, rendered_row, row_height);
+    grid.style()
+        .set_property("--article-scroll-offset", &format!("{offset:.3}px"))
+}
+
+fn ensure_browser_article_scroll_rows(
+    document: &web_sys::Document,
+    grid: &web_sys::Element,
+    viewport: ratzilla::ratatui::layout::Rect,
+) -> Result<(), JsValue> {
+    let layout = format!(
+        "{}:{}:{}:{}",
+        viewport.x, viewport.y, viewport.width, viewport.height
+    );
+    if grid.get_attribute("data-article-scroll-layout").as_deref() == Some(&layout) {
+        return Ok(());
+    }
+    reset_browser_article_scroll_rows(grid)?;
+
+    let rows = grid.query_selector_all("pre")?;
+    for row_index in 0..rows.length() {
+        let Some(node) = rows.item(row_index) else {
+            continue;
+        };
+        let Some(row) = node.dyn_ref::<web_sys::Element>() else {
+            continue;
+        };
+        row.set_attribute("data-terminal-row", &row_index.to_string())?;
+        let cells = row.query_selector_all("span:not(.web-article-scroll-row)")?;
+        for column in 0..cells.length() {
+            if let Some(node) = cells.item(column)
+                && let Some(cell) = node.dyn_ref::<web_sys::Element>()
+            {
+                cell.set_attribute("data-terminal-cell", "")?;
+                cell.set_attribute("data-terminal-column", &column.to_string())?;
+            }
+        }
+
+        let row_number = row_index.min(u32::from(u16::MAX)) as u16;
+        if row_number < viewport.top() || row_number >= viewport.bottom() {
+            row.set_attribute("class", "web-article-static-line")?;
+            continue;
+        }
+        row.set_attribute("class", "web-article-scroll-line")?;
+        let wrapper = document.create_element("span")?;
+        wrapper.set_attribute("class", "web-article-scroll-row")?;
+        let first = cells.item(u32::from(viewport.left()));
+        let Some(first) = first else {
+            continue;
+        };
+        if let Some(first_cell) = first.dyn_ref::<web_sys::Element>() {
+            let width = first_cell.get_bounding_client_rect().width() * f64::from(viewport.width);
+            wrapper.set_attribute("style", &format!("width:{width:.3}px"))?;
+        }
+        row.insert_before(&wrapper, Some(&first))?;
+        for column in viewport.left()..viewport.right() {
+            if let Some(cell) = cells.item(u32::from(column)) {
+                wrapper.append_child(&cell)?;
+            }
+        }
+    }
+    grid.set_attribute("data-article-scroll-layout", &layout)?;
+    Ok(())
 }
 
 fn sync_browser_output_close(
@@ -727,13 +949,32 @@ fn set_area_class(
 ) -> Result<(), JsValue> {
     for row in area.top()..area.bottom() {
         for column in area.left()..area.right() {
-            let selector = format!("pre:nth-child({}) span:nth-child({})", row + 1, column + 1);
-            if let Some(cell) = grid.query_selector(&selector)? {
+            if let Some(cell) = terminal_cell(grid, row, column)? {
                 cell.set_attribute("class", class_name)?;
             }
         }
     }
     Ok(())
+}
+
+fn terminal_cell(
+    grid: &web_sys::Element,
+    row: u16,
+    column: u16,
+) -> Result<Option<web_sys::Element>, JsValue> {
+    let addressed = format!(
+        "pre:nth-child({}) [data-terminal-column=\"{}\"]",
+        row + 1,
+        column
+    );
+    if let Some(cell) = grid.query_selector(&addressed)? {
+        return Ok(Some(cell));
+    }
+    grid.query_selector(&format!(
+        "pre:nth-child({}) > span:nth-child({})",
+        row + 1,
+        column + 1
+    ))
 }
 
 fn sync_browser_text_selection() -> Result<(), JsValue> {
@@ -765,7 +1006,7 @@ fn sync_browser_text_selection() -> Result<(), JsValue> {
         let Some(row) = row.dyn_ref::<web_sys::Element>() else {
             continue;
         };
-        let cells = row.query_selector_all("span")?;
+        let cells = row.query_selector_all("span:not(.web-article-scroll-row)")?;
         let mut text = Vec::with_capacity(cells.length() as usize);
         for index in 0..cells.length() {
             text.push(
@@ -898,6 +1139,8 @@ fn browser_has_text_selection() -> bool {
 fn install_browser_events(
     app: Rc<RefCell<App>>,
     viewport: Rc<Cell<ratzilla::ratatui::layout::Rect>>,
+    browser_image_ids: Rc<RefCell<Vec<String>>>,
+    scroll_settle_generation: Rc<Cell<u32>>,
 ) -> Result<(), JsValue> {
     // RatZilla replaces its inner grid after a resize, so events must live on
     // the stable window/terminal nodes instead of that transient grid.
@@ -910,6 +1153,9 @@ fn install_browser_events(
         .ok_or_else(|| JsValue::from_str("terminal unavailable"))?;
 
     let scroll_app = Rc::clone(&app);
+    let scroll_viewport = Rc::clone(&viewport);
+    let scroll_image_ids = Rc::clone(&browser_image_ids);
+    let scroll_generation = Rc::clone(&scroll_settle_generation);
     let scroll_terminal = terminal.clone();
     let scroll = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
         if scroll_app.borrow().selected() != Tab::Articles
@@ -923,18 +1169,41 @@ fn install_browser_events(
         let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
             return;
         };
-        let Ok(Some(first_row)) = grid.query_selector("pre") else {
+        let Ok(Some(row_height)) = browser_terminal_row_height(&grid) else {
             return;
         };
-        let row_height = first_row.get_bounding_client_rect().height();
-        if row_height <= 0.0 {
-            return;
-        }
         let scroll_top = f64::from(scroll_terminal.scroll_top().max(0));
-        let row = (scroll_top / row_height).round() as u16;
-        let _ = scroll_app
-            .borrow_mut()
-            .update(Message::SetArticleScroll(row));
+        let rendered_row = grid
+            .get_attribute("data-rendered-article-scroll")
+            .and_then(|row| row.parse::<u16>().ok())
+            .unwrap_or_else(|| scroll_app.borrow().article_scroll());
+        let _ = apply_browser_article_scroll_offset(&grid, scroll_top, rendered_row, row_height);
+        let _ = position_browser_images(&document, scroll_top);
+
+        let limit = scroll_app.borrow().article_scroll_limit();
+        let row = native_scroll_row(scroll_top, row_height, limit);
+        if scroll_app.borrow().article_scroll() != row {
+            let _ = clear_cell_class(&grid, ".web-native-image-cell");
+            let _ = scroll_app
+                .borrow_mut()
+                .update(Message::SetArticleScroll(row));
+        }
+
+        let generation = scroll_generation.get().wrapping_add(1);
+        scroll_generation.set(generation);
+        let settle_generation = Rc::clone(&scroll_generation);
+        let settle_app = Rc::clone(&scroll_app);
+        let settle_viewport = Rc::clone(&scroll_viewport);
+        let settle_image_ids = Rc::clone(&scroll_image_ids);
+        spawn_local(async move {
+            TimeoutFuture::new(120).await;
+            if settle_generation.get() != generation {
+                return;
+            }
+            let app = settle_app.borrow();
+            let _ = sync_browser_images(&app, settle_viewport.get(), &settle_image_ids);
+            let _ = sync_browser_text_selection();
+        });
     });
     terminal.add_event_listener_with_callback("scroll", scroll.as_ref().unchecked_ref())?;
     scroll.forget();
@@ -1265,6 +1534,30 @@ fn pointer_cell(
     terminal: &web_sys::Element,
     area: ratzilla::ratatui::layout::Rect,
 ) -> (u16, u16) {
+    if let Some(target) = event
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    {
+        let cell = if target.has_attribute("data-terminal-column") {
+            Some(target)
+        } else {
+            target.closest("[data-terminal-column]").ok().flatten()
+        };
+        if let Some(cell) = cell
+            && let Some(column) = cell
+                .get_attribute("data-terminal-column")
+                .and_then(|column| column.parse::<u16>().ok())
+            && let Some(row) = cell.closest("pre[data-terminal-row]").ok().flatten()
+            && let Some(row) = row
+                .get_attribute("data-terminal-row")
+                .and_then(|row| row.parse::<u16>().ok())
+        {
+            return (
+                column.min(area.width.saturating_sub(1)),
+                row.min(area.height.saturating_sub(1)),
+            );
+        }
+    }
     if let Some(document) = web_sys::window().and_then(|window| window.document())
         && let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid")
         && let Ok(Some(first_row)) = grid.query_selector("pre")
@@ -1423,6 +1716,16 @@ fn activate_at(
     }
 }
 
+fn sync_browser_image_positions() -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let scroll_top = document
+        .get_element_by_id("terminal")
+        .map_or(0.0, |terminal| f64::from(terminal.scroll_top().max(0)));
+    position_browser_images(&document, scroll_top)
+}
+
 fn sync_browser_images(
     app: &App,
     area: ratzilla::ratatui::layout::Rect,
@@ -1455,10 +1758,10 @@ fn sync_browser_images(
     clear_cell_class(&grid, ".web-native-image-cell")?;
     let viewport = svetsec_ui::native_image_viewport(area, app);
     let article_open = app.selected() == Tab::Articles && app.opened_article().is_some();
-    // Ratatui advances text in whole terminal rows. Keep native images on the
-    // same rendered row instead of moving them for every fractional wheel delta.
     let scroll_top = if article_open {
-        rendered_scroll_top(app.article_scroll(), row_height)
+        document
+            .get_element_by_id("terminal")
+            .map_or(0.0, |terminal| f64::from(terminal.scroll_top().max(0)))
     } else {
         0.0
     };
@@ -2511,9 +2814,10 @@ mod tests {
     use svetsec_core::{App, ArticleContent, ArticleImage, Message, Tab};
 
     use super::{
-        DomSignature, WebRoute, browser_image_id, browser_image_url_at, browser_key_code,
+        DomSignature, RenderSignature, WebRoute, article_navigation_only_transition,
+        article_scroll_offset, browser_image_id, browser_image_url_at, browser_key_code,
         cell_contains_selectable_text, grid_axis, grid_cell_axis, localized_account_error,
-        rendered_scroll_top, selection_runs, structural_dom_transition,
+        native_scroll_row, rendered_scroll_top, selection_runs, structural_dom_transition,
     };
 
     #[test]
@@ -2638,11 +2942,54 @@ mod tests {
     }
 
     #[test]
-    fn native_scroll_keeps_the_terminal_grid_stationary() {
+    fn native_scroll_interpolates_between_terminal_rows() {
         let html = include_str!("../index.html");
         assert!(html.contains("position: sticky"));
+        assert!(html.contains("--article-scroll-offset"));
+        assert!(html.contains("translate3d"));
         assert!(html.contains("overflow-anchor: none"));
         assert_eq!(rendered_scroll_top(3, 19.5), 58.5);
+        assert_eq!(native_scroll_row(58.4, 19.5, 20), 2);
+        assert_eq!(native_scroll_row(58.5, 19.5, 20), 3);
+        assert_eq!(native_scroll_row(999.0, 19.5, 4), 4);
+        assert_eq!(article_scroll_offset(66.0, 3, 20.0), 6.0);
+        assert_eq!(article_scroll_offset(39.0, 2, 20.0), -1.0);
+        assert_eq!(article_scroll_offset(200.0, 2, 20.0), 20.0);
+    }
+
+    #[test]
+    fn article_navigation_uses_the_lightweight_dom_sync_path() {
+        let area = ratzilla::ratatui::layout::Rect::new(0, 0, 100, 30);
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "long-read".into(),
+            title: "Long read".into(),
+            markdown: (0..80).map(|row| format!("Row {row}\n")).collect(),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        app.set_article_viewport_rows(10);
+        let before = DomSignature::new(area, &app);
+        let _ = app.update(Message::SetArticleScroll(1));
+        let after = DomSignature::new(area, &app);
+        assert!(article_navigation_only_transition(&before, &after));
+
+        let _ = app.update(Message::Hover(Some(svetsec_core::HelpTarget::Logo)));
+        let hovered = DomSignature::new(area, &app);
+        assert!(!article_navigation_only_transition(&after, &hovered));
+    }
+
+    #[test]
+    fn render_signature_skips_idle_frames_but_tracks_animation() {
+        let area = ratzilla::ratatui::layout::Rect::new(0, 0, 100, 30);
+        let mut app = App::default();
+        app.begin_articles_load();
+        let before = RenderSignature::new(area, &app);
+        let _ = app.update(Message::AdvanceSkeleton);
+        let animated = RenderSignature::new(area, &app);
+        assert_ne!(before, animated);
+        assert_eq!(animated, RenderSignature::new(area, &app));
     }
 
     #[test]

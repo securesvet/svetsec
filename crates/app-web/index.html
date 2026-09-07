@@ -89,10 +89,37 @@
       }
 
       #terminal[data-native-scroll="true"] #terminal_ratzilla_grid {
+        --article-scroll-offset: 0px;
         position: sticky;
         z-index: 1;
         top: 0;
         left: 0;
+      }
+
+      #terminal_ratzilla_grid > pre.web-article-scroll-line {
+        position: relative;
+        z-index: 1;
+        overflow: visible;
+        background: #fff;
+      }
+
+      #terminal_ratzilla_grid > pre.web-article-static-line {
+        position: relative;
+        z-index: 2;
+      }
+
+      .web-article-scroll-row {
+        display: inline-flex;
+        height: var(--terminal-cell-height);
+        align-items: flex-start;
+        white-space: pre;
+        vertical-align: top;
+        transform: translate3d(0, var(--article-scroll-offset), 0);
+        will-change: transform;
+      }
+
+      .web-article-scroll-row > span {
+        flex: 0 0 auto;
       }
 
       #web-article-scroll-spacer {
@@ -119,7 +146,7 @@
         image-rendering: auto;
       }
 
-      #terminal_ratzilla_grid > pre > span.web-native-image-cell {
+      #terminal_ratzilla_grid > pre span.web-native-image-cell {
         color: transparent !important;
         background: #fff !important;
         cursor: zoom-in;
@@ -150,32 +177,36 @@
          measured DOM cells aligned with that buffer, including at browser
          zoom levels where 1ch is no longer close to 10 CSS pixels. */
       #terminal > pre > span[style*="width: 1ch"],
-      #terminal_ratzilla_grid > pre > span[style*="width: 1ch"] {
+      #terminal_ratzilla_grid > pre > span[style*="width: 1ch"],
+      #terminal_ratzilla_grid > pre > .web-article-scroll-row > span[style*="width: 1ch"] {
         width: var(--terminal-cell-width) !important;
       }
 
       #terminal > pre > span[style*="width: 2ch"],
-      #terminal_ratzilla_grid > pre > span[style*="width: 2ch"] {
+      #terminal_ratzilla_grid > pre > span[style*="width: 2ch"],
+      #terminal_ratzilla_grid > pre > .web-article-scroll-row > span[style*="width: 2ch"] {
         width: calc(var(--terminal-cell-width) * 2) !important;
       }
 
       #terminal > pre > span[style*="width: 0ch"],
-      #terminal_ratzilla_grid > pre > span[style*="width: 0ch"] {
+      #terminal_ratzilla_grid > pre > span[style*="width: 0ch"],
+      #terminal_ratzilla_grid > pre > .web-article-scroll-row > span[style*="width: 0ch"] {
         width: 0 !important;
       }
 
-      #terminal_ratzilla_grid > pre > span {
+      #terminal_ratzilla_grid > pre > span,
+      #terminal_ratzilla_grid > pre > .web-article-scroll-row > span {
         user-select: none;
         -webkit-user-select: none;
       }
 
-      #terminal_ratzilla_grid > pre > span.web-selectable-text {
+      #terminal_ratzilla_grid > pre span.web-selectable-text {
         cursor: text;
         user-select: text;
         -webkit-user-select: text;
       }
 
-      #terminal_ratzilla_grid > pre > span.web-selection-muted {
+      #terminal_ratzilla_grid > pre span.web-selection-muted {
         user-select: none !important;
         -webkit-user-select: none !important;
       }
