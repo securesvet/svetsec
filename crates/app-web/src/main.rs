@@ -5,7 +5,16 @@ use std::{
 };
 
 use gloo_timers::future::TimeoutFuture;
-use ratzilla::{DomBackend, event::KeyCode, ratatui::Terminal};
+use ratzilla::{
+    CellSized, DomBackend,
+    event::KeyCode,
+    ratatui::{
+        Terminal,
+        backend::{Backend, ClearType, WindowSize},
+        buffer::Cell as TerminalCell,
+        layout::{Position, Size},
+    },
+};
 use svetsec_core::{
     App, ArticleContent, ArticleImage, ArticleSummary, Comment, Effect, HelpTarget, Message, Tab,
 };
@@ -15,6 +24,121 @@ use web_sys::{
     HtmlInputElement, HtmlTextAreaElement, KeyboardEvent, MouseEvent, Request, RequestCredentials,
     RequestInit, Response,
 };
+
+/// `DomBackend::size` uses the physical screen on mobile user agents. That is
+/// larger than the actual terminal whenever the bottom touch controls are
+/// visible, so Ratatui renders a desktop-sized grid and CSS has to squash it
+/// into the phone viewport. Keep the DOM renderer, but report the dimensions
+/// of its real parent element to Ratatui instead.
+struct ViewportDomBackend {
+    inner: DomBackend,
+    parent_id: &'static str,
+}
+
+impl ViewportDomBackend {
+    fn new_by_id(parent_id: &'static str) -> Result<Self, ratzilla::error::Error> {
+        Ok(Self {
+            inner: DomBackend::new_by_id(parent_id)?,
+            parent_id,
+        })
+    }
+
+    fn viewport_size(&self) -> io::Result<Size> {
+        let document = web_sys::window()
+            .and_then(|window| window.document())
+            .ok_or_else(|| io::Error::other("document unavailable"))?;
+        let parent = document
+            .get_element_by_id(self.parent_id)
+            .ok_or_else(|| io::Error::other("terminal element unavailable"))?;
+        let bounds = parent.get_bounding_client_rect();
+        let (cell_width, cell_height) = self.inner.cell_size_css_px();
+        Ok(terminal_grid_size(
+            bounds.width(),
+            bounds.height(),
+            cell_width,
+            cell_height,
+        ))
+    }
+}
+
+fn terminal_grid_size(
+    viewport_width: f64,
+    viewport_height: f64,
+    cell_width: f32,
+    cell_height: f32,
+) -> Size {
+    let cells = |viewport: f64, cell: f32| {
+        if !viewport.is_finite() || !cell.is_finite() || viewport <= 0.0 || cell <= 0.0 {
+            return 1;
+        }
+        (viewport / f64::from(cell))
+            .floor()
+            .clamp(1.0, f64::from(u16::MAX)) as u16
+    };
+    Size::new(
+        cells(viewport_width, cell_width),
+        cells(viewport_height, cell_height),
+    )
+}
+
+impl Backend for ViewportDomBackend {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a TerminalCell)>,
+    {
+        self.inner.draw(content)
+    }
+
+    fn append_lines(&mut self, count: u16) -> Result<(), Self::Error> {
+        self.inner.append_lines(count)
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+        self.inner.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn size(&self) -> Result<Size, Self::Error> {
+        self.viewport_size()
+    }
+
+    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        let columns_rows = self.viewport_size()?;
+        let (cell_width, cell_height) = self.inner.cell_size_css_px();
+        Ok(WindowSize {
+            columns_rows,
+            pixels: Size::new(
+                (f32::from(columns_rows.width) * cell_width) as u16,
+                (f32::from(columns_rows.height) * cell_height) as u16,
+            ),
+        })
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.inner.flush()
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DomSignature {
@@ -312,7 +436,7 @@ fn main() -> io::Result<()> {
         current: initial_route.clone(),
         resolving: matches!(initial_route, WebRoute::Article(_)),
     }));
-    let backend = DomBackend::new_by_id("terminal")?;
+    let backend = ViewportDomBackend::new_by_id("terminal")?;
     let mut terminal = Terminal::new(backend)?;
     let full_redraw_required = Rc::new(Cell::new(false));
     install_full_redraw_on_resize(Rc::clone(&full_redraw_required))
@@ -2818,6 +2942,7 @@ mod tests {
         article_scroll_offset, browser_image_id, browser_image_url_at, browser_key_code,
         cell_contains_selectable_text, grid_axis, grid_cell_axis, localized_account_error,
         native_scroll_row, rendered_scroll_top, selection_runs, structural_dom_transition,
+        terminal_grid_size,
     };
 
     #[test]
@@ -2836,6 +2961,22 @@ mod tests {
         assert_eq!(grid_axis(10.0, 0.0, 100), 0);
         assert_eq!(grid_cell_axis(55.0, 10.0, 100), 5);
         assert_eq!(grid_cell_axis(2_000.0, 10.0, 100), 99);
+    }
+
+    #[test]
+    fn phone_grid_uses_the_visible_terminal_instead_of_the_physical_screen() {
+        assert_eq!(
+            terminal_grid_size(390.0, 664.0, 10.0, 20.0),
+            ratzilla::ratatui::layout::Size::new(39, 33)
+        );
+        assert_eq!(
+            terminal_grid_size(844.0, 270.0, 10.0, 20.0),
+            ratzilla::ratatui::layout::Size::new(84, 13)
+        );
+
+        let html = include_str!("../index.html");
+        assert!(!html.contains("window.screen"));
+        assert!(!html.contains("navigator.userAgent"));
     }
 
     #[test]

@@ -31,6 +31,8 @@ const CODE_NUMBER: Color = Color::Rgb(176, 78, 22);
 const CODE_COMMENT: Color = Color::Rgb(100, 112, 124);
 const CODE_FOCUS: Color = Color::Rgb(236, 242, 248);
 const MOBILE_BREAKPOINT: u16 = 56;
+const SIDEBAR_BREAKPOINT: u16 = 76;
+const SIDEBAR_MIN_HEIGHT: u16 = 18;
 const RESUME_LINK_LABEL: &str = "svetsec.ru/resume";
 
 const fn resume_prefix(language: Language, compact: bool) -> &'static str {
@@ -255,7 +257,7 @@ pub fn article_areas(area: Rect, app: &App) -> Vec<(usize, Rect)> {
 
 fn articles_primary_panel(area: Rect) -> (Rect, bool) {
     let content = layout(area).content;
-    if content.width >= 76 {
+    if shows_sidebar(content) {
         (
             Layout::horizontal([
                 Constraint::Percentage(68),
@@ -583,18 +585,22 @@ fn article_geometry(area: Rect) -> (Rect, bool, u16, u16, u16) {
 
 fn primary_panel_area(area: Rect) -> (Rect, bool) {
     let content = layout(area).content;
-    let compact = content.width < 76;
-    let panel = if compact {
-        content
-    } else {
+    let compact = content.width < SIDEBAR_BREAKPOINT;
+    let panel = if shows_sidebar(content) {
         Layout::horizontal([
             Constraint::Percentage(68),
             Constraint::Length(1),
             Constraint::Percentage(32),
         ])
         .split(content)[0]
+    } else {
+        content
     };
     (panel, compact)
+}
+
+const fn shows_sidebar(area: Rect) -> bool {
+    area.width >= SIDEBAR_BREAKPOINT && area.height >= SIDEBAR_MIN_HEIGHT
 }
 
 fn article_content_width(area: Rect) -> u16 {
@@ -664,7 +670,7 @@ pub fn python_output_area(area: Rect, app: &App) -> Option<Rect> {
         return None;
     }
     let content = layout(area).content;
-    if content.width >= 76 {
+    if shows_sidebar(content) {
         Some(
             Layout::horizontal([
                 Constraint::Percentage(68),
@@ -707,7 +713,7 @@ pub fn comment_action_areas(area: Rect, app: &App) -> Vec<(CommentAction, Rect)>
         return Vec::new();
     }
     let content = layout(area).content;
-    if content.width < 76 {
+    if !shows_sidebar(content) {
         return Vec::new();
     }
     let panel = Layout::horizontal([
@@ -957,13 +963,13 @@ fn render_language_notice(frame: &mut Frame<'_>, area: Rect, language: Language)
 
 fn render_content(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if app.selected() == Tab::Articles && app.article_loading() {
-        render_primary_panel(frame, area, app, area.width < 76);
+        render_primary_panel(frame, area, app, area.width < SIDEBAR_BREAKPOINT);
         return;
     }
     let show_python_output = app.selected() == Tab::Articles
         && app.opened_article().is_some()
         && (app.python_running() || app.python_output().is_some());
-    if area.width >= 76 {
+    if shows_sidebar(area) {
         let columns = Layout::horizontal([
             Constraint::Percentage(68),
             Constraint::Length(1),
@@ -2448,7 +2454,7 @@ fn layout(area: Rect) -> UiLayout {
         (columns[0], [columns[1], columns[2], columns[3], columns[4]])
     };
 
-    let status = (!compact && vertical[1].width >= 76).then(|| {
+    let status = shows_sidebar(vertical[1]).then(|| {
         Layout::horizontal([
             Constraint::Percentage(68),
             Constraint::Length(1),
@@ -2550,6 +2556,18 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &App::default()))
             .expect("compact UI should render");
+    }
+
+    #[test]
+    fn short_landscape_phone_collapses_the_sidebar_without_narrowing_the_content() {
+        let area = Rect::new(0, 0, 84, 13);
+        let page = layout(area);
+        let (primary, compact) = super::primary_panel_area(area);
+
+        assert!(!page.compact, "the wide header still fits on one row");
+        assert!(page.status.is_none());
+        assert_eq!(primary, page.content);
+        assert!(!compact, "wide content keeps its normal horizontal padding");
     }
 
     #[test]
