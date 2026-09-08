@@ -17,7 +17,8 @@ use tower_http::{
 use uuid::Uuid;
 
 use crate::db::{
-    Article, ArticleInput, Comment, CommentAuthor, CreateCommentError, Database, User,
+    Article, ArticleInput, Comment, CommentAuthor, CommentReader, CreateCommentError, Database,
+    User,
 };
 use crate::github::{GithubArticle, GithubArticleBody, GithubSource};
 use crate::python::PyodideRunner;
@@ -63,9 +64,29 @@ struct CommentInput {
     body: String,
 }
 
+#[derive(Deserialize)]
+struct CommentReadInput {
+    through: i64,
+}
+
+#[derive(Serialize)]
+struct CommentNotifications {
+    articles: Vec<String>,
+}
+
 struct Identity {
     owner: bool,
     user: Option<User>,
+}
+
+impl Identity {
+    fn comment_reader(&self) -> Option<CommentReader> {
+        if self.owner {
+            Some(CommentReader::Owner)
+        } else {
+            self.user.as_ref().map(|user| CommentReader::User(user.id))
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -172,6 +193,8 @@ pub async fn serve(
             "/api/articles/{slug}/comments/{comment_id}",
             delete(remove_comment),
         )
+        .route("/api/comments/unread", get(unread_comments))
+        .route("/api/comments/{slug}/read", post(mark_comments_read))
         .route("/api/github/articles", get(github_articles))
         .route("/api/github/articles/{slug}", get(github_article))
         .route(
@@ -389,6 +412,7 @@ async fn telegram_callback(
         .upsert_telegram_user(
             &profile.id,
             profile.username.as_deref(),
+            profile.verified_username.as_deref(),
             profile.picture.as_deref(),
             claim_comment_moderator,
         )
@@ -567,6 +591,42 @@ async fn remove_comment(
         return Err(ApiError(StatusCode::NOT_FOUND, "comment not found"));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unread_comments(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Result<Json<CommentNotifications>, ApiError> {
+    let identity = identity(&state, token_from(&headers).as_deref(), true)?;
+    let articles = identity
+        .comment_reader()
+        .map(|reader| state.db.unread_comment_articles(reader))
+        .transpose()
+        .map_err(internal)?
+        .unwrap_or_default();
+    Ok(Json(CommentNotifications { articles }))
+}
+
+async fn mark_comments_read(
+    State(state): State<HttpState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<CommentReadInput>,
+) -> Result<Json<CommentNotifications>, ApiError> {
+    validate_slug(&slug)?;
+    if input.through < 0 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid comment cursor"));
+    }
+    let identity = identity(&state, token_from(&headers).as_deref(), true)?;
+    let reader = identity
+        .comment_reader()
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "login required"))?;
+    state
+        .db
+        .mark_comments_read(reader, &slug, input.through)
+        .map_err(internal)?;
+    let articles = state.db.unread_comment_articles(reader).map_err(internal)?;
+    Ok(Json(CommentNotifications { articles }))
 }
 
 async fn github_articles(

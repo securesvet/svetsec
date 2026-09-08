@@ -30,6 +30,7 @@ const CODE_STRING: Color = Color::Rgb(20, 110, 100);
 const CODE_NUMBER: Color = Color::Rgb(176, 78, 22);
 const CODE_COMMENT: Color = Color::Rgb(100, 112, 124);
 const CODE_FOCUS: Color = Color::Rgb(236, 242, 248);
+const NOTIFICATION: Color = Color::Rgb(201, 82, 54);
 const MOBILE_BREAKPOINT: u16 = 56;
 const SIDEBAR_BREAKPOINT: u16 = 76;
 const SIDEBAR_MIN_HEIGHT: u16 = 18;
@@ -79,7 +80,7 @@ struct UiLayout {
     footer: Rect,
     logo: Rect,
     account: Rect,
-    tabs: [Rect; 4],
+    tabs: Rect,
     status: Option<Rect>,
     compact: bool,
 }
@@ -136,21 +137,24 @@ impl CodeBlockAction {
 }
 
 #[must_use]
-pub fn tab_at(area: Rect, column: u16, row: u16) -> Option<Tab> {
-    tab_areas(area)
+pub fn tab_at(area: Rect, column: u16, row: u16, app: &App) -> Option<Tab> {
+    tab_areas(area, app)
         .into_iter()
         .find_map(|(tab, area)| area.contains((column, row).into()).then_some(tab))
 }
 
 #[must_use]
-pub fn tab_areas(area: Rect) -> [(Tab, Rect); 4] {
-    let tabs = layout(area).tabs;
-    [
-        (Tab::Main, tabs[0]),
-        (Tab::Articles, tabs[1]),
-        (Tab::Projects, tabs[2]),
-        (Tab::Info, tabs[3]),
-    ]
+pub fn tab_areas(area: Rect, app: &App) -> Vec<(Tab, Rect)> {
+    tab_areas_in(layout(area).tabs, app)
+}
+
+fn tab_areas_in(area: Rect, app: &App) -> Vec<(Tab, Rect)> {
+    let tabs = app.available_tabs();
+    let constraints = vec![Constraint::Ratio(1, tabs.len() as u32); tabs.len()];
+    tabs.iter()
+        .copied()
+        .zip(Layout::horizontal(constraints).split(area).iter().copied())
+        .collect()
 }
 
 #[must_use]
@@ -648,7 +652,7 @@ pub fn help_target_at(area: Rect, column: u16, row: u16, app: &App) -> Option<He
     if layout.logo.contains(position) {
         return Some(HelpTarget::Logo);
     }
-    if let Some((tab, _)) = tab_areas(area)
+    if let Some((tab, _)) = tab_areas(area, app)
         .into_iter()
         .find(|(_, area)| area.contains(position))
     {
@@ -823,7 +827,7 @@ pub fn native_image_placements<'a>(area: Rect, app: &'a App) -> Vec<ArticleImage
                 })
                 .collect()
         }
-        Tab::Main | Tab::Projects => Vec::new(),
+        Tab::Main | Tab::Projects | Tab::Secret => Vec::new(),
     }
 }
 
@@ -852,7 +856,7 @@ pub fn native_image_viewport(area: Rect, app: &App) -> Option<Rect> {
             ))
         }
         Tab::Articles if app.opened_article().is_some() => Some(article_viewport_area(area)),
-        Tab::Main | Tab::Articles | Tab::Projects => None,
+        Tab::Main | Tab::Articles | Tab::Projects | Tab::Secret => None,
     }
 }
 
@@ -936,7 +940,7 @@ fn render_header(frame: &mut Frame<'_>, layout: &UiLayout, app: &App) {
         layout.account,
     );
 
-    for (tab, tab_area) in Tab::ALL.into_iter().zip(layout.tabs) {
+    for (tab, tab_area) in tab_areas_in(layout.tabs, app) {
         let selected_style = Style::new().fg(WHITE).add_modifier(Modifier::BOLD);
         let idle_style = Style::new().fg(MUTED);
         let hover_style = Style::new().fg(INK).add_modifier(Modifier::BOLD);
@@ -955,16 +959,19 @@ fn render_header(frame: &mut Frame<'_>, layout: &UiLayout, app: &App) {
             (false, false) => {}
         }
 
+        let tab_style = if tab == app.selected() {
+            selected_style
+        } else if hovered {
+            hover_style
+        } else {
+            idle_style
+        };
+        let mut label = vec![Span::styled(tab.label(app.language()), tab_style)];
+        if tab == Tab::Articles && app.has_unread_comments() {
+            label.push(Span::styled(" ●", Style::new().fg(NOTIFICATION).bold()));
+        }
         frame.render_widget(
-            Paragraph::new(tab.label(app.language()))
-                .alignment(Alignment::Center)
-                .style(if tab == app.selected() {
-                    selected_style
-                } else if hovered {
-                    hover_style
-                } else {
-                    idle_style
-                }),
+            Paragraph::new(Line::from(label)).alignment(Alignment::Center),
             tab_area,
         );
     }
@@ -1049,10 +1056,25 @@ fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: b
     }
     frame.render_widget(Block::new().style(Style::new().bg(PANEL)), area);
 
+    let private = app.selected() == Tab::Secret;
     let mut content = vec![
         Line::from(vec![
-            Span::styled("● SVETSEC", Style::new().fg(INK).bold()),
-            Span::styled("  //  RUST + WASM", Style::new().fg(MUTED)),
+            Span::styled(
+                if private {
+                    "● PRIVATE"
+                } else {
+                    "● SVETSEC"
+                },
+                Style::new().fg(INK).bold(),
+            ),
+            Span::styled(
+                if private {
+                    "  //  OWNER ONLY"
+                } else {
+                    "  //  RUST + WASM"
+                },
+                Style::new().fg(MUTED),
+            ),
         ]),
         Line::default(),
         Line::from(Span::styled(
@@ -1078,6 +1100,16 @@ fn render_primary_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: b
         if let Some(image) = app.profile_image() {
             content.extend(image_lines(image));
         }
+    } else if private {
+        content.push(Line::from(Span::styled(
+            app.selected().description(app.language()),
+            Style::new().fg(BODY),
+        )));
+        content.push(Line::default());
+        content.push(Line::from(vec![
+            Span::styled("ACCESS  ", Style::new().fg(MUTED)),
+            Span::styled("GRANTED", Style::new().fg(CONTROL_ACTIVE).bold()),
+        ]));
     } else {
         content.push(Line::from(Span::styled(
             app.selected().description(app.language()),
@@ -1273,6 +1305,9 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
                             },
                         ),
                     ];
+                    if app.article_has_unread_comments(&article.slug) {
+                        spans.push(Span::styled(" ●", Style::new().fg(NOTIFICATION).bold()));
+                    }
                     if !article.labels.is_empty() {
                         spans.push(Span::raw("  "));
                         spans.extend(label_spans(&article.labels));
@@ -2316,6 +2351,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
                     "READ  •  j/k scroll  •  m comment  •  Esc back"
                 } else if app.selected() == Tab::Projects {
                     "PROJECTS  •  j/k select  •  Enter open"
+                } else if app.secret_access() {
+                    "←/→ tabs  •  1–5 jump"
                 } else {
                     "←/→ tabs  •  1–4 jump"
                 })
@@ -2352,14 +2389,28 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
             Span::styled(" OPEN ", Style::new().fg(WHITE).bg(CONTROL).bold()),
             Span::styled(" Enter/o   ", Style::new().fg(BODY)),
             Span::styled(" TABS ", Style::new().fg(WHITE).bg(CONTROL).bold()),
-            Span::styled(" 1 2 3 4 ", Style::new().fg(BODY)),
+            Span::styled(
+                if app.secret_access() {
+                    " 1 2 3 4 5 "
+                } else {
+                    " 1 2 3 4 "
+                },
+                Style::new().fg(BODY),
+            ),
         ])
     } else {
         Line::from(vec![
             Span::styled(" NAV ", Style::new().fg(WHITE).bg(CONTROL_ACTIVE).bold()),
             Span::styled(" ← → / h l   ", Style::new().fg(BODY)),
             Span::styled(" TABS ", Style::new().fg(WHITE).bg(CONTROL).bold()),
-            Span::styled(" 1 2 3 4   ", Style::new().fg(BODY)),
+            Span::styled(
+                if app.secret_access() {
+                    " 1 2 3 4 5   "
+                } else {
+                    " 1 2 3 4   "
+                },
+                Style::new().fg(BODY),
+            ),
             Span::styled(" OPEN ", Style::new().fg(WHITE).bg(CONTROL).bold()),
             Span::styled(" g x   ", Style::new().fg(BODY)),
             Span::styled(" QUIT ", Style::new().fg(MUTED)),
@@ -2432,39 +2483,16 @@ fn layout(area: Rect) -> UiLayout {
     let (logo, account, tabs) = if compact {
         let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
         let brand = Layout::horizontal([Constraint::Length(15), Constraint::Min(0)]).split(rows[0]);
-        let tab_columns = Layout::horizontal([
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-        ])
-        .split(rows[1]);
-        (
-            brand[0],
-            brand[1],
-            [
-                tab_columns[0],
-                tab_columns[1],
-                tab_columns[2],
-                tab_columns[3],
-            ],
-        )
+        (brand[0], brand[1], rows[1])
     } else {
         let columns = Layout::horizontal([
             Constraint::Length(15),
-            Constraint::Length(11),
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(11),
+            Constraint::Length(54),
             Constraint::Min(0),
             Constraint::Length(28),
         ])
         .split(inner);
-        (
-            columns[0],
-            columns[6],
-            [columns[1], columns[2], columns[3], columns[4]],
-        )
+        (columns[0], columns[3], columns[1])
     };
 
     let status = shows_sidebar(vertical[1]).then(|| {
@@ -2551,7 +2579,7 @@ mod tests {
         comment_action_areas, comment_action_at, comments_viewport_area, help_target_at,
         label_color, layout, markdown_image_offsets, markdown_lines, markdown_lines_with_focus,
         native_image_placements, project_areas, project_at, python_output_area,
-        python_output_close_area, render, resume_link_area, single_line, tab_at,
+        python_output_close_area, render, resume_link_area, single_line, tab_areas, tab_at,
     };
 
     #[test]
@@ -2615,13 +2643,26 @@ mod tests {
     #[test]
     fn desktop_menu_hit_testing_matches_visual_tabs() {
         let area = Rect::new(0, 0, 80, 24);
-        assert_eq!(tab_at(area, 16, 1), Some(Tab::Main));
-        assert_eq!(tab_at(area, 28, 1), Some(Tab::Articles));
-        assert_eq!(tab_at(area, 40, 1), Some(Tab::Projects));
-        assert_eq!(tab_at(area, 52, 1), Some(Tab::Info));
-        assert_eq!(tab_at(area, 2, 1), None);
+        let app = App::default();
+        for (tab, tab_area) in tab_areas(area, &app) {
+            assert_eq!(
+                tab_at(
+                    area,
+                    tab_area.left() + tab_area.width / 2,
+                    tab_area.top(),
+                    &app,
+                ),
+                Some(tab)
+            );
+        }
+        assert!(
+            !tab_areas(area, &app)
+                .iter()
+                .any(|(tab, _)| *tab == Tab::Secret)
+        );
+        assert_eq!(tab_at(area, 2, 1, &app), None);
         assert_eq!(
-            help_target_at(area, 2, 1, &App::default()),
+            help_target_at(area, 2, 1, &app),
             Some(svetsec_core::HelpTarget::Logo)
         );
     }
@@ -2629,8 +2670,11 @@ mod tests {
     #[test]
     fn hovered_tab_gets_a_distinct_button_background() {
         let area = Rect::new(0, 0, 80, 24);
-        let articles = layout(area).tabs[1];
         let mut app = App::default();
+        let articles = tab_areas(area, &app)
+            .into_iter()
+            .find_map(|(tab, area)| (tab == Tab::Articles).then_some(area))
+            .expect("Articles tab");
         let _ = app.update(Message::Hover(Some(svetsec_core::HelpTarget::Tab(
             Tab::Articles,
         ))));
@@ -2644,14 +2688,84 @@ mod tests {
     }
 
     #[test]
+    fn unread_comments_add_a_dot_to_articles_and_its_article_row() {
+        let area = Rect::new(0, 0, 100, 24);
+        let mut app = App::default();
+        app.set_unread_comment_articles(vec!["hello".into()]);
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_articles(vec![ArticleSummary {
+            slug: "hello".into(),
+            title_en: "Hello".into(),
+            title_ru: "Привет".into(),
+            date: "2026-09-09".into(),
+            published: true,
+            source_path: None,
+            edit_url: None,
+            labels: Vec::new(),
+        }]);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (area.top()..area.bottom())
+            .flat_map(|y| (area.left()..area.right()).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(rendered.contains("Articles ●"));
+        assert!(rendered.contains("Hello ●"));
+    }
+
+    #[test]
     fn compact_menu_uses_a_second_header_row() {
         let area = Rect::new(0, 0, 36, 20);
         let layout = layout(area);
+        let app = App::default();
         assert!(layout.compact);
-        assert_eq!(tab_at(area, 3, 2), Some(Tab::Main));
-        assert_eq!(tab_at(area, 12, 2), Some(Tab::Articles));
-        assert_eq!(tab_at(area, 21, 2), Some(Tab::Projects));
-        assert_eq!(tab_at(area, 30, 2), Some(Tab::Info));
+        for (tab, tab_area) in tab_areas(area, &app) {
+            assert_eq!(tab_area.top(), 2);
+            assert_eq!(
+                tab_at(
+                    area,
+                    tab_area.left() + tab_area.width / 2,
+                    tab_area.top(),
+                    &app,
+                ),
+                Some(tab)
+            );
+        }
+    }
+
+    #[test]
+    fn secret_tab_is_rendered_and_clickable_only_with_private_access() {
+        let area = Rect::new(0, 0, 100, 24);
+        let guest = App::default();
+        assert!(
+            !tab_areas(area, &guest)
+                .iter()
+                .any(|(tab, _)| *tab == Tab::Secret)
+        );
+
+        let mut owner = App::default();
+        let _ = owner.update(Message::SetAuthenticated(true));
+        let secret = tab_areas(area, &owner)
+            .into_iter()
+            .find_map(|(tab, area)| (tab == Tab::Secret).then_some(area))
+            .expect("owner Secret tab");
+        assert_eq!(
+            tab_at(area, secret.left() + secret.width / 2, secret.top(), &owner,),
+            Some(Tab::Secret)
+        );
+
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let _ = owner.update(Message::SelectTab(Tab::Secret));
+        terminal.draw(|frame| render(frame, &owner)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (area.top()..area.bottom())
+            .flat_map(|y| (area.left()..area.right()).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(rendered.contains("PRIVATE"));
+        assert!(rendered.contains("OWNER ONLY"));
+        assert!(rendered.contains("GRANTED"));
     }
 
     #[test]
@@ -3223,6 +3337,7 @@ mod tests {
         app.set_comments(vec![Comment {
             id: 1,
             author: "reader".into(),
+            telegram_url: None,
             owner: false,
             body: "Useful note".into(),
             created_at: 1,

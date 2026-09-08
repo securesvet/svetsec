@@ -16,6 +16,10 @@ adds SQLite-backed accounts, sessions, article comments, and articles.
 - Visitors can register a username and password, log in, and leave comments on
   articles. Reader passwords use the same salted Argon2id storage, and comments
   are rate-limited server-side.
+- Signed-in readers get a persistent dot beside `Articles` and beside each
+  article with comments they have not viewed yet. Read cursors are stored in
+  SQLite, ignore the reader's own comments, and stay synchronized between the
+  browser and SSH.
 - The password-backed owner and the Telegram account whose verified username is
   `svetsec` can delete comments. The Telegram moderator role is bound to that
   account's immutable Telegram ID, so changing a visible username cannot move
@@ -54,6 +58,9 @@ adds SQLite-backed accounts, sessions, article comments, and articles.
   web asset when that source changes.
 - Projects presents `brand.tbank.ru` and the `securesvet/svetsec` repository as
   keyboard- and pointer-accessible cards shared by the browser and terminal UI.
+- Secret is a private placeholder workspace shown only to the owner session or
+  the verified Telegram comment moderator. Guest navigation to `/secret`
+  returns to the main page.
 
 ## Requirements
 

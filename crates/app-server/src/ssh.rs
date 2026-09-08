@@ -27,7 +27,7 @@ use svetsec_core::{
 };
 use tokio::sync::{Mutex, mpsc::UnboundedSender, mpsc::unbounded_channel};
 
-use crate::db::{ArticleInput, CommentAuthor, CreateCommentError, Database, User};
+use crate::db::{ArticleInput, CommentAuthor, CommentReader, CreateCommentError, Database, User};
 use crate::github::{GithubSource, valid_date};
 use crate::python::PyodideRunner;
 
@@ -75,6 +75,12 @@ struct Client {
     comment_editor: Option<CommentEditor>,
     owner: bool,
     user: Option<User>,
+}
+
+impl Client {
+    fn comment_reader(&self) -> Option<CommentReader> {
+        comment_reader(self.owner, self.user.as_ref())
+    }
 }
 
 #[derive(Clone)]
@@ -142,13 +148,23 @@ pub async fn serve(
 impl SshServer {
     fn start_render_loop(&self) {
         let clients = Arc::clone(&self.clients);
+        let database = self.database.clone();
         tokio::spawn(async move {
             let mut advance_skeleton = false;
+            let mut notification_ticks = 0_u16;
             loop {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 advance_skeleton = !advance_skeleton;
+                notification_ticks = (notification_ticks + 1) % 200;
+                let refresh_notifications = notification_ticks == 0;
                 let mut clients = clients.lock().await;
                 for client in clients.values_mut() {
+                    if refresh_notifications
+                        && let Some(reader) = client.comment_reader()
+                        && let Ok(articles) = database.unread_comment_articles(reader)
+                    {
+                        client.app.set_unread_comment_articles(articles);
+                    }
                     if advance_skeleton
                         && (client.app.articles_loading() || client.app.article_loading())
                     {
@@ -271,6 +287,18 @@ impl Handler for SshServer {
                 .as_ref()
                 .map(|user| user.username.clone()),
         );
+        let can_moderate_comments = self.authenticated_owner
+            || self.authenticated_user.as_ref().is_some_and(|user| {
+                self.database
+                    .user_can_moderate_comments(user.id)
+                    .unwrap_or_default()
+            });
+        app.set_can_moderate_comments(can_moderate_comments);
+        if let Some(reader) =
+            comment_reader(self.authenticated_owner, self.authenticated_user.as_ref())
+        {
+            app.set_unread_comment_articles(self.database.unread_comment_articles(reader)?);
+        }
         self.clients.lock().await.insert(
             self.id,
             Client {
@@ -335,9 +363,26 @@ impl Handler for SshServer {
                     if let (Some(slug), Some(author)) = (slug, author) {
                         match self.database.create_comment(&slug, author, body.trim()) {
                             Ok(_) => match self.database.list_comments(&slug) {
-                                Ok(comments) => client
-                                    .app
-                                    .set_comments(comments.into_iter().map(core_comment).collect()),
+                                Ok(comments) => {
+                                    let through = comments
+                                        .iter()
+                                        .map(|comment| comment.id)
+                                        .max()
+                                        .unwrap_or_default();
+                                    client.app.set_comments(
+                                        comments.into_iter().map(core_comment).collect(),
+                                    );
+                                    if let Some(reader) = client.comment_reader()
+                                        && self
+                                            .database
+                                            .mark_comments_read(reader, &slug, through)
+                                            .is_ok()
+                                        && let Ok(articles) =
+                                            self.database.unread_comment_articles(reader)
+                                    {
+                                        client.app.set_unread_comment_articles(articles);
+                                    }
+                                }
                                 Err(_) => {
                                     client.app.set_comments_error("Could not reload comments.")
                                 }
@@ -471,6 +516,8 @@ impl Handler for SshServer {
             Some(Message::SelectTab(Tab::Projects))
         } else if data == b"4" {
             Some(Message::SelectTab(Tab::Info))
+        } else if data == b"5" {
+            Some(Message::SelectTab(Tab::Secret))
         } else if data == b"r" || data == "к".as_bytes() {
             Some(Message::ToggleLanguage)
         } else if data == b"?" {
@@ -601,13 +648,32 @@ impl SshServer {
         let clients = Arc::clone(&self.clients);
         let id = self.id;
         tokio::spawn(async move {
-            let language = clients
+            let (language, reader) = clients
                 .lock()
                 .await
                 .get(&id)
-                .map_or(Language::default(), |client| client.app.language());
+                .map_or((Language::default(), None), |client| {
+                    (client.app.language(), client.comment_reader())
+                });
             let result = github.article(&slug, language).await;
             let comments = database.list_comments(&slug);
+            let notifications = if result.is_ok() {
+                comments.as_ref().ok().and_then(|comments| {
+                    let through = comments
+                        .iter()
+                        .map(|comment| comment.id)
+                        .max()
+                        .unwrap_or_default();
+                    reader.and_then(|reader| {
+                        database
+                            .mark_comments_read(reader, &slug, through)
+                            .and_then(|()| database.unread_comment_articles(reader))
+                            .ok()
+                    })
+                })
+            } else {
+                None
+            };
             if let Some(client) = clients.lock().await.get_mut(&id) {
                 match result {
                     Ok(article) => {
@@ -633,6 +699,9 @@ impl SshServer {
                                 .app
                                 .set_comments(comments.into_iter().map(core_comment).collect()),
                             Err(_) => client.app.set_comments_error("Could not load comments."),
+                        }
+                        if let Some(articles) = notifications {
+                            client.app.set_unread_comment_articles(articles);
                         }
                     }
                     Err(_) => client
@@ -676,9 +745,18 @@ fn core_comment(comment: crate::db::Comment) -> Comment {
     Comment {
         id: comment.id,
         author: comment.author,
+        telegram_url: comment.telegram_url,
         owner: comment.owner,
         body: comment.body,
         created_at: comment.created_at,
+    }
+}
+
+fn comment_reader(owner: bool, user: Option<&User>) -> Option<CommentReader> {
+    if owner {
+        Some(CommentReader::Owner)
+    } else {
+        user.map(|user| CommentReader::User(user.id))
     }
 }
 

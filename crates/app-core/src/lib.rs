@@ -101,10 +101,18 @@ pub enum Tab {
     Articles,
     Projects,
     Info,
+    Secret,
 }
 
 impl Tab {
-    pub const ALL: [Self; 4] = [Self::Main, Self::Articles, Self::Projects, Self::Info];
+    pub const PUBLIC: [Self; 4] = [Self::Main, Self::Articles, Self::Projects, Self::Info];
+    pub const ALL: [Self; 5] = [
+        Self::Main,
+        Self::Articles,
+        Self::Projects,
+        Self::Info,
+        Self::Secret,
+    ];
 
     #[must_use]
     pub const fn index(self) -> usize {
@@ -113,6 +121,7 @@ impl Tab {
             Self::Articles => 1,
             Self::Projects => 2,
             Self::Info => 3,
+            Self::Secret => 4,
         }
     }
 
@@ -123,6 +132,7 @@ impl Tab {
             Self::Articles => "Articles",
             Self::Projects => "Projects",
             Self::Info => "Info",
+            Self::Secret => "Secret",
         }
     }
 
@@ -133,10 +143,12 @@ impl Tab {
             (Self::Articles, Language::En) => "Articles",
             (Self::Projects, Language::En) => "Selected projects",
             (Self::Info, Language::En) => "About svetsec.ru",
+            (Self::Secret, Language::En) => "Private workspace",
             (Self::Main, Language::Ru) => "Привет, интернет.",
             (Self::Articles, Language::Ru) => "Статьи",
             (Self::Projects, Language::Ru) => "Избранные проекты",
             (Self::Info, Language::Ru) => "О svetsec.ru",
+            (Self::Secret, Language::Ru) => "Личное пространство",
         }
     }
 
@@ -155,6 +167,9 @@ impl Tab {
             (Self::Info, Language::En) => {
                 "svetsec.ru is a personal site built as a cross-platform TUI experiment."
             }
+            (Self::Secret, Language::En) => {
+                "This private workspace is visible only to the site owner."
+            }
             (Self::Main, Language::Ru) => {
                 "Небольшой уголок интернета на одном Rust-коде для терминала и браузера."
             }
@@ -165,6 +180,7 @@ impl Tab {
             (Self::Info, Language::Ru) => {
                 "svetsec.ru — персональный сайт и эксперимент с кроссплатформенным TUI."
             }
+            (Self::Secret, Language::Ru) => "Это личное пространство видно только владельцу сайта.",
         }
     }
 }
@@ -310,6 +326,7 @@ pub struct ArticleContent {
 pub struct Comment {
     pub id: i64,
     pub author: String,
+    pub telegram_url: Option<String>,
     pub owner: bool,
     pub body: String,
     pub created_at: i64,
@@ -377,6 +394,8 @@ pub struct App {
     telegram_login_enabled: bool,
     can_moderate_comments: bool,
     keyboard_hints_hidden: bool,
+    unread_comment_articles: Vec<String>,
+    comment_notification_generation: u64,
     comments: Vec<Comment>,
     comments_loading: bool,
     comments_error: Option<String>,
@@ -468,6 +487,28 @@ impl App {
 
     pub fn set_can_moderate_comments(&mut self, can_moderate: bool) {
         self.can_moderate_comments = can_moderate;
+        self.enforce_secret_access();
+    }
+
+    #[must_use]
+    pub const fn secret_access(&self) -> bool {
+        self.authenticated || self.can_moderate_comments
+    }
+
+    #[must_use]
+    pub fn available_tabs(&self) -> &[Tab] {
+        if self.secret_access() {
+            &Tab::ALL
+        } else {
+            &Tab::PUBLIC
+        }
+    }
+
+    fn enforce_secret_access(&mut self) {
+        if self.selected == Tab::Secret && !self.secret_access() {
+            self.selected = Tab::Main;
+            self.hovered = None;
+        }
     }
 
     #[must_use]
@@ -477,6 +518,50 @@ impl App {
 
     pub fn set_keyboard_hints_hidden(&mut self, hidden: bool) {
         self.keyboard_hints_hidden = hidden;
+    }
+
+    #[must_use]
+    pub fn has_unread_comments(&self) -> bool {
+        !self.unread_comment_articles.is_empty()
+    }
+
+    #[must_use]
+    pub fn unread_comment_articles(&self) -> &[String] {
+        &self.unread_comment_articles
+    }
+
+    #[must_use]
+    pub fn article_has_unread_comments(&self, slug: &str) -> bool {
+        self.unread_comment_articles
+            .iter()
+            .any(|article| article == slug)
+    }
+
+    pub fn set_unread_comment_articles(&mut self, mut articles: Vec<String>) {
+        articles.sort_unstable();
+        articles.dedup();
+        self.unread_comment_articles = articles;
+        self.comment_notification_generation = self.comment_notification_generation.wrapping_add(1);
+    }
+
+    pub fn mark_article_comments_seen(&mut self, slug: &str) {
+        self.unread_comment_articles
+            .retain(|article| article != slug);
+        self.comment_notification_generation = self.comment_notification_generation.wrapping_add(1);
+    }
+
+    pub fn begin_comment_notification_load(&mut self) -> u64 {
+        self.comment_notification_generation = self.comment_notification_generation.wrapping_add(1);
+        self.comment_notification_generation
+    }
+
+    pub fn finish_comment_notification_load(&mut self, generation: u64, mut articles: Vec<String>) {
+        if generation != self.comment_notification_generation {
+            return;
+        }
+        articles.sort_unstable();
+        articles.dedup();
+        self.unread_comment_articles = articles;
     }
 
     #[must_use]
@@ -794,17 +879,27 @@ impl App {
 
         match message {
             Message::NextTab => {
-                let next = (self.selected.index() + 1) % Tab::ALL.len();
-                self.selected = Tab::ALL[next];
+                let tabs = self.available_tabs();
+                let current = tabs
+                    .iter()
+                    .position(|tab| *tab == self.selected)
+                    .unwrap_or_default();
+                self.selected = tabs[(current + 1) % tabs.len()];
                 self.hovered = None;
             }
             Message::PreviousTab => {
-                let previous = (self.selected.index() + Tab::ALL.len() - 1) % Tab::ALL.len();
-                self.selected = Tab::ALL[previous];
+                let tabs = self.available_tabs();
+                let current = tabs
+                    .iter()
+                    .position(|tab| *tab == self.selected)
+                    .unwrap_or_default();
+                self.selected = tabs[(current + tabs.len() - 1) % tabs.len()];
                 self.hovered = None;
             }
             Message::SelectTab(tab) => {
-                self.selected = tab;
+                if tab != Tab::Secret || self.secret_access() {
+                    self.selected = tab;
+                }
                 self.hovered = None;
             }
             Message::SelectLanguage(language) => {
@@ -815,7 +910,10 @@ impl App {
                 self.language = self.language.next();
                 self.show_language_notice();
             }
-            Message::SetAuthenticated(authenticated) => self.authenticated = authenticated,
+            Message::SetAuthenticated(authenticated) => {
+                self.authenticated = authenticated;
+                self.enforce_secret_access();
+            }
             Message::Hover(target) => self.hovered = target,
             Message::HideLanguageNotice(generation) => {
                 if generation == self.language_notice_generation {
@@ -1278,6 +1376,12 @@ mod tests {
         assert_eq!(app.selected(), Tab::Info);
         let _ = app.update(Message::NextTab);
         assert_eq!(app.selected(), Tab::Main);
+
+        let _ = app.update(Message::SetAuthenticated(true));
+        let _ = app.update(Message::PreviousTab);
+        assert_eq!(app.selected(), Tab::Secret);
+        let _ = app.update(Message::NextTab);
+        assert_eq!(app.selected(), Tab::Main);
     }
 
     #[test]
@@ -1322,6 +1426,31 @@ mod tests {
         assert_eq!(Tab::Articles.label(Language::Ru), "Articles");
         assert_eq!(Tab::Projects.label(Language::Ru), "Projects");
         assert_eq!(Tab::Info.label(Language::Ru), "Info");
+        assert_eq!(Tab::Secret.label(Language::Ru), "Secret");
+    }
+
+    #[test]
+    fn secret_tab_requires_owner_or_telegram_moderator_access() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Secret));
+        assert_eq!(app.selected(), Tab::Main);
+
+        app.set_user(Some("reader".into()));
+        let _ = app.update(Message::SelectTab(Tab::Secret));
+        assert_eq!(app.selected(), Tab::Main);
+
+        app.set_can_moderate_comments(true);
+        let _ = app.update(Message::SelectTab(Tab::Secret));
+        assert_eq!(app.selected(), Tab::Secret);
+
+        app.set_can_moderate_comments(false);
+        assert_eq!(app.selected(), Tab::Main);
+
+        let _ = app.update(Message::SetAuthenticated(true));
+        let _ = app.update(Message::SelectTab(Tab::Secret));
+        assert_eq!(app.selected(), Tab::Secret);
+        let _ = app.update(Message::SetAuthenticated(false));
+        assert_eq!(app.selected(), Tab::Main);
     }
 
     #[test]
@@ -1344,6 +1473,7 @@ mod tests {
         app.set_comments(vec![Comment {
             id: 1,
             author: "reader".into(),
+            telegram_url: None,
             owner: false,
             body: "Nice article".into(),
             created_at: 1,
@@ -1352,6 +1482,28 @@ mod tests {
         assert!(!app.comments_loading());
         let _ = app.update(Message::CloseArticle);
         assert!(app.comments().is_empty());
+    }
+
+    #[test]
+    fn unread_comment_articles_are_deduplicated_and_cleared_individually() {
+        let mut app = App::default();
+        app.set_unread_comment_articles(vec!["second".into(), "first".into(), "second".into()]);
+        assert!(app.has_unread_comments());
+        assert_eq!(app.unread_comment_articles(), ["first", "second"]);
+        assert!(app.article_has_unread_comments("first"));
+
+        app.mark_article_comments_seen("first");
+        assert!(!app.article_has_unread_comments("first"));
+        assert!(app.article_has_unread_comments("second"));
+        app.mark_article_comments_seen("second");
+        assert!(!app.has_unread_comments());
+
+        let stale = app.begin_comment_notification_load();
+        let current = app.begin_comment_notification_load();
+        app.finish_comment_notification_load(stale, vec!["stale".into()]);
+        assert!(!app.has_unread_comments());
+        app.finish_comment_notification_load(current, vec!["current".into()]);
+        assert_eq!(app.unread_comment_articles(), ["current"]);
     }
 
     #[test]

@@ -162,6 +162,7 @@ struct DomSignature {
     telegram_login_enabled: bool,
     can_moderate_comments: bool,
     keyboard_hints_hidden: bool,
+    unread_comment_articles: Vec<String>,
     comments_len: usize,
     comments_loading: bool,
     comments_error: bool,
@@ -186,6 +187,7 @@ enum WebRoute {
     Article(String),
     Projects,
     Info,
+    Secret,
 }
 
 impl WebRoute {
@@ -208,6 +210,7 @@ impl WebRoute {
             }
             ["info"] => Self::Info,
             ["projects"] => Self::Projects,
+            ["secret"] => Self::Secret,
             _ => Self::Main,
         }
     }
@@ -217,6 +220,7 @@ impl WebRoute {
             Tab::Main => Self::Main,
             Tab::Info => Self::Info,
             Tab::Projects => Self::Projects,
+            Tab::Secret => Self::Secret,
             Tab::Articles => app.opened_article().map_or(Self::Articles, |article| {
                 Self::Article(article.slug.clone())
             }),
@@ -230,6 +234,7 @@ impl WebRoute {
             Self::Article(slug) => format!("/articles/{slug}"),
             Self::Projects => "/projects".into(),
             Self::Info => "/info".into(),
+            Self::Secret => "/secret".into(),
         }
     }
 
@@ -239,6 +244,7 @@ impl WebRoute {
             Self::Articles | Self::Article(_) => Tab::Articles,
             Self::Projects => Tab::Projects,
             Self::Info => Tab::Info,
+            Self::Secret => Tab::Secret,
         }
     }
 }
@@ -247,6 +253,7 @@ impl WebRoute {
 struct RouteState {
     current: WebRoute,
     resolving: bool,
+    session_resolved: bool,
 }
 
 impl DomSignature {
@@ -272,6 +279,7 @@ impl DomSignature {
             telegram_login_enabled: app.telegram_login_enabled(),
             can_moderate_comments: app.can_moderate_comments(),
             keyboard_hints_hidden: app.keyboard_hints_hidden(),
+            unread_comment_articles: app.unread_comment_articles().to_vec(),
             comments_len: app.comments().len(),
             comments_loading: app.comments_loading(),
             comments_error: app.comments_error().is_some(),
@@ -315,6 +323,7 @@ fn sync_browser_route(app: &App, route_state: &Rc<RefCell<RouteState>>) {
                 WebRoute::Article(slug) => format!("{slug} — svetsec.ru"),
                 WebRoute::Projects => "Projects — svetsec.ru".into(),
                 WebRoute::Info => "Info — svetsec.ru".into(),
+                WebRoute::Secret => "Secret — svetsec.ru".into(),
             };
             document.set_title(&title);
         }
@@ -341,7 +350,28 @@ fn install_route_events(
     Ok(())
 }
 
-fn apply_web_route(app: Rc<RefCell<App>>, route: WebRoute, route_state: Rc<RefCell<RouteState>>) {
+fn apply_web_route(
+    app: Rc<RefCell<App>>,
+    mut route: WebRoute,
+    route_state: Rc<RefCell<RouteState>>,
+) {
+    if route == WebRoute::Secret && !app.borrow().secret_access() {
+        if !route_state.borrow().session_resolved {
+            let mut state = route_state.borrow_mut();
+            state.current = route;
+            state.resolving = true;
+            return;
+        }
+        route = WebRoute::Main;
+        if let Some(window) = web_sys::window() {
+            let _ = window
+                .history()
+                .and_then(|history| history.replace_state_with_url(&JsValue::NULL, "", Some("/")));
+            if let Some(document) = window.document() {
+                document.set_title("svetsec.ru");
+            }
+        }
+    }
     {
         let mut state = route_state.borrow_mut();
         state.current = route.clone();
@@ -349,7 +379,7 @@ fn apply_web_route(app: Rc<RefCell<App>>, route: WebRoute, route_state: Rc<RefCe
     }
     let _ = app.borrow_mut().update(Message::SelectTab(route.tab()));
     match route {
-        WebRoute::Main | WebRoute::Projects | WebRoute::Info => {
+        WebRoute::Main | WebRoute::Projects | WebRoute::Info | WebRoute::Secret => {
             if app.borrow().opened_article().is_some() {
                 let _ = app.borrow_mut().update(Message::CloseArticle);
             }
@@ -443,7 +473,8 @@ fn main() -> io::Result<()> {
     let scroll_settle_generation = Rc::new(Cell::new(0_u32));
     let route_state = Rc::new(RefCell::new(RouteState {
         current: initial_route.clone(),
-        resolving: matches!(initial_route, WebRoute::Article(_)),
+        resolving: matches!(initial_route, WebRoute::Article(_) | WebRoute::Secret),
+        session_resolved: false,
     }));
     let backend = ViewportDomBackend::new_by_id("terminal")?;
     let mut terminal = Terminal::new(backend)?;
@@ -462,7 +493,8 @@ fn main() -> io::Result<()> {
     install_route_events(Rc::clone(&app), Rc::clone(&route_state))
         .map_err(|error| io::Error::other(format!("browser route setup failed: {error:?}")))?;
 
-    load_session(Rc::clone(&app));
+    load_session(Rc::clone(&app), Rc::clone(&route_state));
+    watch_comment_notifications(Rc::clone(&app));
     animate_ui(Rc::clone(&app));
     apply_web_route(Rc::clone(&app), initial_route, Rc::clone(&route_state));
 
@@ -703,7 +735,15 @@ fn sync_browser_tabs(area: ratzilla::ratatui::layout::Rect, app: &App) -> Result
     let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
         return Ok(());
     };
-    for (kind, tab) in svetsec_ui::tab_areas(area) {
+    let stale_tabs = grid.query_selector_all(".web-tab-cell")?;
+    for index in 0..stale_tabs.length() {
+        if let Some(node) = stale_tabs.item(index)
+            && let Some(cell) = node.dyn_ref::<web_sys::Element>()
+        {
+            cell.remove_attribute("class")?;
+        }
+    }
+    for (kind, tab) in svetsec_ui::tab_areas(area, app) {
         let selected = if app.selected() == kind {
             " web-tab-selected"
         } else {
@@ -835,6 +875,10 @@ fn sync_mobile_controls(app: &App) -> Result<(), JsValue> {
         "data-article-open",
         if article_open { "true" } else { "false" },
     )?;
+    controls.set_attribute(
+        "data-secret-access",
+        if app.secret_access() { "true" } else { "false" },
+    )?;
     if let Some(body) = document.query_selector("body")? {
         body.set_attribute(
             "data-mobile-article-open",
@@ -856,12 +900,32 @@ fn sync_mobile_controls(app: &App) -> Result<(), JsValue> {
         (Tab::Articles, "articles"),
         (Tab::Projects, "projects"),
         (Tab::Info, "info"),
+        (Tab::Secret, "secret"),
     ] {
         let Some(link) = controls.query_selector(&format!("[data-mobile-tab=\"{selector}\"]"))?
         else {
             continue;
         };
         link.set_text_content(Some(tab.label(app.language())));
+        if tab == Tab::Secret {
+            if app.secret_access() {
+                link.remove_attribute("hidden")?;
+            } else {
+                link.set_attribute("hidden", "")?;
+            }
+        }
+        if tab == Tab::Articles {
+            let unread = app.has_unread_comments();
+            link.set_attribute("data-unread", if unread { "true" } else { "false" })?;
+            link.set_attribute(
+                "aria-label",
+                if unread {
+                    "Articles, new comments"
+                } else {
+                    "Articles"
+                },
+            )?;
+        }
         if app.selected() == tab {
             link.set_attribute("aria-current", "page")?;
         } else {
@@ -1051,10 +1115,24 @@ fn append_comment_entry(
 ) -> Result<(), JsValue> {
     let entry = document.create_element("article")?;
     let heading = document.create_element("div")?;
-    let author = document.create_element("strong")?;
+    let author = if let Some(url) = comment.telegram_url.as_deref() {
+        let link = document.create_element("a")?;
+        link.set_attribute("href", url)?;
+        link.set_attribute("target", "_blank")?;
+        link.set_attribute("rel", "noopener noreferrer")?;
+        link.set_attribute(
+            "aria-label",
+            &format!("Open @{} on Telegram", comment.author),
+        )?;
+        link.set_attribute("title", "Open Telegram profile")?;
+        link
+    } else {
+        document.create_element("strong")?
+    };
     let body = document.create_element("div")?;
     entry.set_class_name("comment-entry");
     heading.set_class_name("comment-entry-heading");
+    author.set_class_name("comment-author");
     author.set_text_content(Some(&format!("@{}", comment.author)));
     body.set_text_content(Some(&comment.body));
     heading.append_child(&author)?;
@@ -1728,6 +1806,7 @@ fn install_browser_events(
             ("articles", Tab::Articles),
             ("projects", Tab::Projects),
             ("info", Tab::Info),
+            ("secret", Tab::Secret),
         ] {
             let Some(link) =
                 controls.query_selector(&format!("[data-mobile-tab=\"{selector}\"]"))?
@@ -2160,7 +2239,11 @@ fn activate_at(
         load_selected_article(app);
         return;
     }
-    if let Some(tab) = svetsec_ui::tab_at(area, column, row) {
+    let tab = {
+        let app = app.borrow();
+        svetsec_ui::tab_at(area, column, row, &app)
+    };
+    if let Some(tab) = tab {
         let _ = app.borrow_mut().update(Message::SelectTab(tab));
         if tab == Tab::Articles {
             load_articles(app, false);
@@ -2430,6 +2513,7 @@ fn message_for_key(code: KeyCode) -> Message {
         KeyCode::Char('2') => Message::SelectTab(Tab::Articles),
         KeyCode::Char('3') => Message::SelectTab(Tab::Projects),
         KeyCode::Char('4') => Message::SelectTab(Tab::Info),
+        KeyCode::Char('5') => Message::SelectTab(Tab::Secret),
         KeyCode::Char('r' | 'к') => Message::ToggleLanguage,
         KeyCode::Char('g' | 'п') => Message::BeginSiteShortcut,
         KeyCode::Char('x' | 'ч') => Message::CompleteSiteShortcut,
@@ -2445,10 +2529,64 @@ fn apply_effect(effect: Effect) {
     }
 }
 
-fn load_session(app: Rc<RefCell<App>>) {
+fn load_session(app: Rc<RefCell<App>>, route_state: Rc<RefCell<RouteState>>) {
     spawn_local(async move {
         if let Ok(state) = fetch_session("GET", "/api/session", None).await {
             apply_session_state(&app, state);
+        }
+        let pending_secret = {
+            let mut state = route_state.borrow_mut();
+            state.session_resolved = true;
+            state.current == WebRoute::Secret
+        };
+        if pending_secret {
+            apply_web_route(app, WebRoute::Secret, route_state);
+        }
+    });
+}
+
+fn watch_comment_notifications(app: Rc<RefCell<App>>) {
+    spawn_local(async move {
+        loop {
+            TimeoutFuture::new(15_000).await;
+            load_comment_notifications(Rc::clone(&app));
+        }
+    });
+}
+
+fn load_comment_notifications(app: Rc<RefCell<App>>) {
+    if !app.borrow().signed_in() {
+        app.borrow_mut().set_unread_comment_articles(Vec::new());
+        return;
+    }
+    let generation = app.borrow_mut().begin_comment_notification_load();
+    spawn_local(async move {
+        if let Ok(articles) = fetch_comment_notifications("GET", "/api/comments/unread", None).await
+        {
+            app.borrow_mut()
+                .finish_comment_notification_load(generation, articles);
+        }
+    });
+}
+
+fn mark_article_comments_read(app: Rc<RefCell<App>>, slug: String) {
+    let through = {
+        let app = app.borrow();
+        if !app.signed_in() {
+            return;
+        }
+        app.comments()
+            .iter()
+            .map(|comment| comment.id)
+            .max()
+            .unwrap_or_default()
+    };
+    app.borrow_mut().mark_article_comments_seen(&slug);
+    spawn_local(async move {
+        let url = format!("/api/comments/{slug}/read");
+        let body = serde_json::json!({ "through": through }).to_string();
+        if let Ok(articles) = fetch_comment_notifications("POST", &url, Some(body)).await {
+            app.borrow_mut().set_unread_comment_articles(articles);
         }
     });
 }
@@ -2494,12 +2632,29 @@ struct SessionState {
 }
 
 fn apply_session_state(app: &Rc<RefCell<App>>, state: SessionState) {
-    let mut app = app.borrow_mut();
-    let _ = app.update(Message::SetAuthenticated(state.authenticated));
-    app.set_user(state.username);
-    app.set_avatar_url(state.avatar_url);
-    app.set_telegram_login_enabled(state.telegram_enabled);
-    app.set_can_moderate_comments(state.can_moderate_comments);
+    let signed_in = state.authenticated || state.username.is_some();
+    {
+        let mut app = app.borrow_mut();
+        let _ = app.update(Message::SetAuthenticated(state.authenticated));
+        app.set_user(state.username);
+        app.set_avatar_url(state.avatar_url);
+        app.set_telegram_login_enabled(state.telegram_enabled);
+        app.set_can_moderate_comments(state.can_moderate_comments);
+        if !signed_in {
+            app.set_unread_comment_articles(Vec::new());
+        }
+    }
+    if signed_in {
+        if let Some(slug) = app
+            .borrow()
+            .opened_article()
+            .map(|article| article.slug.clone())
+        {
+            mark_article_comments_read(Rc::clone(app), slug);
+        } else {
+            load_comment_notifications(Rc::clone(app));
+        }
+    }
 }
 
 fn install_account_events(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
@@ -3306,6 +3461,7 @@ fn load_comments(app: Rc<RefCell<App>>) {
             Ok(comments) => {
                 app.borrow_mut().set_comments(comments);
                 refresh_comment_modal(&app);
+                mark_article_comments_read(Rc::clone(&app), slug);
             }
             Err(_) => {
                 let error = match app.borrow().language() {
@@ -3497,6 +3653,11 @@ async fn fetch_comments(slug: &str) -> Result<Vec<Comment>, JsValue> {
                 .and_then(|value| value.as_string())
                 .unwrap_or_default()
         };
+        let optional_string = |field: &str| {
+            js_sys::Reflect::get(&value, &JsValue::from_str(field))
+                .ok()
+                .and_then(|value| value.as_string())
+        };
         let number = |field: &str| {
             js_sys::Reflect::get(&value, &JsValue::from_str(field))
                 .ok()
@@ -3506,6 +3667,7 @@ async fn fetch_comments(slug: &str) -> Result<Vec<Comment>, JsValue> {
         comments.push(Comment {
             id: number("id"),
             author: string("author"),
+            telegram_url: optional_string("telegram_url"),
             owner: js_sys::Reflect::get(&value, &JsValue::from_str("owner"))?
                 .as_bool()
                 .unwrap_or(false),
@@ -3514,6 +3676,19 @@ async fn fetch_comments(slug: &str) -> Result<Vec<Comment>, JsValue> {
         });
     }
     Ok(comments)
+}
+
+async fn fetch_comment_notifications(
+    method: &str,
+    url: &str,
+    body: Option<String>,
+) -> Result<Vec<String>, JsValue> {
+    let json = request_json(method, url, body).await?;
+    let values = js_sys::Reflect::get(&json, &JsValue::from_str("articles"))?;
+    Ok(js_sys::Array::from(&values)
+        .iter()
+        .filter_map(|value| value.as_string())
+        .collect())
 }
 
 fn string_array(value: &JsValue, field: &str) -> Vec<String> {
@@ -3716,6 +3891,11 @@ mod tests {
         let hovered = DomSignature::new(area, &app);
         assert!(!structural_dom_transition(&projects, &hovered));
 
+        app.set_unread_comment_articles(vec!["hello".into()]);
+        let notified = DomSignature::new(area, &app);
+        assert_ne!(hovered, notified);
+        assert!(!structural_dom_transition(&hovered, &notified));
+
         let _ = app.update(Message::SelectTab(Tab::Articles));
         app.begin_article_load();
         let loading = DomSignature::new(area, &app);
@@ -3739,6 +3919,10 @@ mod tests {
         assert!(html.contains("aria-labelledby=\"comment-title\""));
         assert!(!html.contains("id=\"account-owner-login\""));
         assert!(html.contains(".comment-delete:hover"));
+        assert!(html.contains("a.comment-author:hover"));
+        assert!(html.contains("[data-mobile-tab=\"articles\"][data-unread=\"true\"]::after"));
+        assert!(html.contains("data-mobile-tab=\"secret\" hidden"));
+        assert!(html.contains("data-secret-access=\"true\""));
         assert!(html.contains(">Up</button>"));
         assert!(html.contains(">Down</button>"));
         assert!(!html.contains(">K ↑</button>"));
@@ -3807,6 +3991,7 @@ mod tests {
         assert_eq!(WebRoute::from_path("/"), WebRoute::Main);
         assert_eq!(WebRoute::from_path("/articles"), WebRoute::Articles);
         assert_eq!(WebRoute::from_path("/projects"), WebRoute::Projects);
+        assert_eq!(WebRoute::from_path("/secret"), WebRoute::Secret);
         assert_eq!(
             WebRoute::from_path("/articles/hello-world"),
             WebRoute::Article("hello-world".into())
@@ -3817,6 +4002,16 @@ mod tests {
             "/articles/hello-world"
         );
         assert_eq!(WebRoute::Projects.path(), "/projects");
+        assert_eq!(WebRoute::Secret.path(), "/secret");
+
+        let mut guest = App::default();
+        let _ = guest.update(Message::SelectTab(Tab::Secret));
+        assert_eq!(WebRoute::for_app(&guest), WebRoute::Main);
+
+        let mut owner = App::default();
+        let _ = owner.update(Message::SetAuthenticated(true));
+        let _ = owner.update(Message::SelectTab(Tab::Secret));
+        assert_eq!(WebRoute::for_app(&owner), WebRoute::Secret);
 
         let mut app = App::default();
         let _ = app.update(Message::SelectTab(Tab::Articles));

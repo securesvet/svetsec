@@ -665,11 +665,25 @@
         overflow-wrap: anywhere;
       }
 
-      .comment-entry strong {
+      .comment-author {
         min-width: 0;
         color: #315d82;
         overflow: hidden;
         text-overflow: ellipsis;
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      a.comment-author {
+        cursor: pointer;
+      }
+
+      a.comment-author:hover,
+      a.comment-author:focus-visible {
+        color: #1f486b;
+        text-decoration: underline;
+        text-underline-offset: 3px;
+        outline: none;
       }
 
       .comment-entry-heading {
@@ -786,6 +800,10 @@
           gap: 8px;
         }
 
+        #mobile-controls[data-secret-access="true"] .mobile-tab-actions {
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+        }
+
         .mobile-article-actions {
           display: none;
         }
@@ -819,10 +837,30 @@
           -webkit-user-select: none;
         }
 
+        #mobile-controls [hidden] {
+          display: none !important;
+        }
+
         #mobile-controls a[aria-current="page"] {
           border-color: #6da8d3;
           color: #fff;
           background: #315d82;
+        }
+
+        [data-mobile-tab="articles"][data-unread="true"]::after {
+          width: 7px;
+          height: 7px;
+          flex: 0 0 7px;
+          margin-left: 5px;
+          border-radius: 50%;
+          background: #c95236;
+          box-shadow: 0 0 0 2px rgb(201 82 54 / 16%);
+          content: "";
+        }
+
+        [data-mobile-tab="articles"][data-unread="true"][aria-current="page"]::after {
+          background: #ffd27a;
+          box-shadow: 0 0 0 2px rgb(255 210 122 / 22%);
         }
 
         .mobile-tab-actions a {
@@ -940,6 +978,7 @@
         <a href="/articles" data-mobile-tab="articles">Articles</a>
         <a href="/projects" data-mobile-tab="projects">Projects</a>
         <a href="/info" data-mobile-tab="info">Info</a>
+        <a href="/secret" data-mobile-tab="secret" hidden>Secret</a>
       </nav>
     </div>
     <div

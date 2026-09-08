@@ -57,6 +57,7 @@ pub struct Comment {
     pub id: i64,
     pub article_slug: String,
     pub author: String,
+    pub telegram_url: Option<String>,
     pub owner: bool,
     pub body: String,
     pub created_at: i64,
@@ -66,6 +67,32 @@ pub struct Comment {
 pub enum CommentAuthor {
     Owner,
     User(i64),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CommentReader {
+    Owner,
+    User(i64),
+}
+
+impl CommentReader {
+    fn key(self) -> String {
+        match self {
+            Self::Owner => "owner".into(),
+            Self::User(user_id) => format!("user:{user_id}"),
+        }
+    }
+
+    const fn owner(self) -> bool {
+        matches!(self, Self::Owner)
+    }
+
+    const fn user_id(self) -> Option<i64> {
+        match self {
+            Self::Owner => None,
+            Self::User(user_id) => Some(user_id),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -153,6 +180,20 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions(expires_at);
             CREATE INDEX IF NOT EXISTS idx_comments_article_created
                 ON comments(article_slug, created_at DESC, id DESC);
+            CREATE TABLE IF NOT EXISTS comment_readers (
+                reader_key TEXT PRIMARY KEY,
+                initialized_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS comment_read_cursors (
+                reader_key TEXT NOT NULL REFERENCES comment_readers(reader_key)
+                    ON DELETE CASCADE,
+                article_slug TEXT NOT NULL,
+                last_comment_id INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (reader_key, article_slug)
+            );
+            CREATE INDEX IF NOT EXISTS idx_comment_read_cursors_article
+                ON comment_read_cursors(article_slug, reader_key);
             CREATE TABLE IF NOT EXISTS telegram_login_attempts (
                 state_hash TEXT PRIMARY KEY,
                 code_verifier TEXT NOT NULL,
@@ -170,6 +211,7 @@ impl Database {
             ",
         )?;
         ensure_column(&connection, "users", "telegram_id", "TEXT")?;
+        ensure_column(&connection, "users", "telegram_username", "TEXT")?;
         ensure_column(&connection, "users", "external_avatar_url", "TEXT")?;
         ensure_column(&connection, "users", "avatar_bytes", "BLOB")?;
         ensure_column(&connection, "users", "avatar_content_type", "TEXT")?;
@@ -320,6 +362,7 @@ impl Database {
         &self,
         telegram_id: &str,
         preferred_username: Option<&str>,
+        verified_username: Option<&str>,
         external_avatar_url: Option<&str>,
         claim_comment_moderator: bool,
     ) -> rusqlite::Result<User> {
@@ -339,10 +382,13 @@ impl Database {
             preferred_username,
             existing.as_ref().map(|user| user.id),
         )?;
+        let telegram_username = verified_telegram_username(verified_username);
         let user = if let Some(mut user) = existing {
             transaction.execute(
-                "UPDATE users SET username = ?1, external_avatar_url = ?2 WHERE id = ?3",
-                params![username, external_avatar_url, user.id],
+                "UPDATE users
+                 SET username = ?1, telegram_username = ?2, external_avatar_url = ?3
+                 WHERE id = ?4",
+                params![username, telegram_username, external_avatar_url, user.id],
             )?;
             user.username = username;
             user.external_avatar_url = external_avatar_url.map(str::to_owned);
@@ -350,9 +396,16 @@ impl Database {
         } else {
             transaction.execute(
                 "INSERT INTO users(
-                    username, password_hash, telegram_id, external_avatar_url, created_at
-                 ) VALUES (?1, '', ?2, ?3, ?4)",
-                params![username, telegram_id, external_avatar_url, now()],
+                    username, password_hash, telegram_id, telegram_username,
+                    external_avatar_url, created_at
+                 ) VALUES (?1, '', ?2, ?3, ?4, ?5)",
+                params![
+                    username,
+                    telegram_id,
+                    telegram_username,
+                    external_avatar_url,
+                    now()
+                ],
             )?;
             User {
                 id: transaction.last_insert_rowid(),
@@ -492,7 +545,13 @@ impl Database {
         let mut statement = connection.prepare(
             "SELECT comments.id, comments.article_slug,
                     CASE WHEN comments.owner = 1 THEN 'svetsec' ELSE users.username END,
-                    comments.owner, comments.body, comments.created_at
+                    comments.owner, comments.body, comments.created_at,
+                    CASE
+                        WHEN comments.owner = 1 THEN 'https://t.me/svetsec'
+                        WHEN users.telegram_username IS NOT NULL
+                            THEN 'https://t.me/' || users.telegram_username
+                        ELSE NULL
+                    END
              FROM comments
              LEFT JOIN users ON users.id = comments.user_id
              WHERE comments.article_slug = ?1
@@ -537,7 +596,13 @@ impl Database {
             .query_row(
                 "SELECT comments.id, comments.article_slug,
                         CASE WHEN comments.owner = 1 THEN 'svetsec' ELSE users.username END,
-                        comments.owner, comments.body, comments.created_at
+                        comments.owner, comments.body, comments.created_at,
+                        CASE
+                            WHEN comments.owner = 1 THEN 'https://t.me/svetsec'
+                            WHEN users.telegram_username IS NOT NULL
+                                THEN 'https://t.me/' || users.telegram_username
+                            ELSE NULL
+                        END
                  FROM comments
                  LEFT JOIN users ON users.id = comments.user_id
                  WHERE comments.id = ?1",
@@ -553,6 +618,72 @@ impl Database {
             params![article_slug, comment_id],
         )?;
         Ok(changed == 1)
+    }
+
+    pub fn unread_comment_articles(&self, reader: CommentReader) -> rusqlite::Result<Vec<String>> {
+        let mut connection = self.connection();
+        let transaction = connection.transaction()?;
+        let reader_key = reader.key();
+        initialize_comment_reader(&transaction, &reader_key)?;
+        let articles = {
+            let mut statement = transaction.prepare(
+                "SELECT comments.article_slug
+                 FROM comments
+                 LEFT JOIN comment_read_cursors
+                   ON comment_read_cursors.reader_key = ?1
+                  AND comment_read_cursors.article_slug = comments.article_slug
+                 WHERE comments.id > COALESCE(comment_read_cursors.last_comment_id, 0)
+                   AND NOT (
+                       (?2 = 1 AND comments.owner = 1)
+                       OR (
+                           ?2 = 0 AND comments.owner = 0
+                           AND comments.user_id = ?3
+                       )
+                   )
+                 GROUP BY comments.article_slug
+                 ORDER BY MAX(comments.id) DESC",
+            )?;
+            statement
+                .query_map(
+                    params![reader_key, reader.owner(), reader.user_id()],
+                    |row| row.get(0),
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        transaction.commit()?;
+        Ok(articles)
+    }
+
+    pub fn mark_comments_read(
+        &self,
+        reader: CommentReader,
+        article_slug: &str,
+        through_comment_id: i64,
+    ) -> rusqlite::Result<()> {
+        let mut connection = self.connection();
+        let transaction = connection.transaction()?;
+        let reader_key = reader.key();
+        initialize_comment_reader(&transaction, &reader_key)?;
+        transaction.execute(
+            "INSERT INTO comment_read_cursors(
+                 reader_key, article_slug, last_comment_id, updated_at
+             ) VALUES (
+                 ?1, ?2,
+                 COALESCE((
+                     SELECT MAX(id) FROM comments
+                     WHERE article_slug = ?2 AND id <= ?3
+                 ), 0),
+                 ?4
+             )
+             ON CONFLICT(reader_key, article_slug) DO UPDATE SET
+                 last_comment_id = MAX(
+                     comment_read_cursors.last_comment_id,
+                     excluded.last_comment_id
+                 ),
+                 updated_at = excluded.updated_at",
+            params![reader_key, article_slug, through_comment_id, now()],
+        )?;
+        transaction.commit()
     }
 
     pub fn list_articles(&self, include_drafts: bool) -> rusqlite::Result<Vec<Article>> {
@@ -660,6 +791,29 @@ fn ensure_column(
     Ok(())
 }
 
+fn initialize_comment_reader(
+    transaction: &rusqlite::Transaction<'_>,
+    reader_key: &str,
+) -> rusqlite::Result<()> {
+    let timestamp = now();
+    let initialized = transaction.execute(
+        "INSERT OR IGNORE INTO comment_readers(reader_key, initialized_at) VALUES (?1, ?2)",
+        params![reader_key, timestamp],
+    )?;
+    if initialized == 1 {
+        transaction.execute(
+            "INSERT INTO comment_read_cursors(
+                 reader_key, article_slug, last_comment_id, updated_at
+             )
+             SELECT ?1, article_slug, MAX(id), ?2
+             FROM comments
+             GROUP BY article_slug",
+            params![reader_key, timestamp],
+        )?;
+    }
+    Ok(())
+}
+
 fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
     Ok(User {
         id: row.get(0)?,
@@ -738,6 +892,16 @@ fn available_telegram_username(
     Err(rusqlite::Error::InvalidQuery)
 }
 
+fn verified_telegram_username(username: Option<&str>) -> Option<String> {
+    let username = username?.trim().trim_start_matches('@');
+    (!username.is_empty()
+        && username.len() <= 32
+        && username
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_'))
+    .then(|| username.to_owned())
+}
+
 fn comment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Comment> {
     Ok(Comment {
         id: row.get(0)?,
@@ -746,6 +910,7 @@ fn comment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Comment> {
         owner: row.get(3)?,
         body: row.get(4)?,
         created_at: row.get(5)?,
+        telegram_url: row.get(6)?,
     })
 }
 
@@ -762,7 +927,10 @@ fn hash_token(token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArticleInput, CommentAuthor, CreateCommentError, Database, TelegramLoginAttempt};
+    use super::{
+        ArticleInput, CommentAuthor, CommentReader, CreateCommentError, Database,
+        TelegramLoginAttempt, verified_telegram_username,
+    };
 
     #[test]
     fn owner_sessions_users_comments_and_articles_share_one_database() {
@@ -789,6 +957,7 @@ mod tests {
             .create_comment("hello", CommentAuthor::User(user.id), "First!")
             .expect("comment");
         assert_eq!(comment.author, "Reader");
+        assert_eq!(comment.telegram_url, None);
         assert_eq!(
             db.list_comments("hello").expect("comments"),
             std::slice::from_ref(&comment)
@@ -854,31 +1023,47 @@ mod tests {
             .upsert_telegram_user(
                 "123456789",
                 None,
+                None,
                 Some("https://example.com/avatar.jpg"),
                 false,
             )
             .expect("Telegram user");
         assert_eq!(user.username, "telegram_123456789");
+        let comment_without_public_username = db
+            .create_comment("telegram", CommentAuthor::User(user.id), "Hello")
+            .expect("Telegram comment");
+        assert_eq!(comment_without_public_username.telegram_url, None);
         assert_eq!(
             user.avatar_url().as_deref(),
             Some("https://example.com/avatar.jpg")
         );
         let same_user = db
-            .upsert_telegram_user("123456789", Some("svetsec"), None, true)
+            .upsert_telegram_user("123456789", Some("svetsec"), Some("svetsec"), None, true)
             .expect("existing Telegram user");
         assert_eq!(same_user.id, user.id);
         assert_eq!(same_user.username, "svetsec");
+        assert_eq!(
+            db.list_comments("telegram").expect("updated comment")[0].telegram_url,
+            Some("https://t.me/svetsec".into())
+        );
         assert!(
             db.user_can_moderate_comments(same_user.id)
                 .expect("moderator lookup")
         );
 
         let other_user = db
-            .upsert_telegram_user("987654321", Some("other"), None, true)
+            .upsert_telegram_user("987654321", Some("other"), Some("other"), None, true)
             .expect("other Telegram user");
         assert!(
             !db.user_can_moderate_comments(other_user.id)
                 .expect("moderator cannot be replaced")
+        );
+        let owner_comment = db
+            .create_comment("owner", CommentAuthor::Owner, "Owner note")
+            .expect("owner comment");
+        assert_eq!(
+            owner_comment.telegram_url.as_deref(),
+            Some("https://t.me/svetsec")
         );
 
         let updated = db
@@ -894,5 +1079,85 @@ mod tests {
             .expect("avatar");
         assert_eq!(avatar.bytes, b"normalized-image");
         assert_eq!(avatar.content_type, "image/jpeg");
+    }
+
+    #[test]
+    fn telegram_profile_username_accepts_only_safe_public_handles() {
+        assert_eq!(
+            verified_telegram_username(Some(" @Secure_Svet ")),
+            Some("Secure_Svet".into())
+        );
+        assert_eq!(verified_telegram_username(Some("display name")), None);
+        assert_eq!(verified_telegram_username(Some("unsafe/path")), None);
+        assert_eq!(verified_telegram_username(None), None);
+    }
+
+    #[test]
+    fn comment_notifications_are_per_reader_persistent_and_ignore_own_comments() {
+        let db = Database::open(":memory:").expect("database");
+        let first = db.create_user("first", "hash").expect("first user");
+        let second = db.create_user("second", "hash").expect("second user");
+        db.create_comment("hello", CommentAuthor::User(first.id), "Existing")
+            .expect("existing comment");
+
+        assert!(
+            db.unread_comment_articles(CommentReader::Owner)
+                .expect("owner baseline")
+                .is_empty()
+        );
+        assert!(
+            db.unread_comment_articles(CommentReader::User(first.id))
+                .expect("reader baseline")
+                .is_empty()
+        );
+        assert!(
+            db.unread_comment_articles(CommentReader::User(second.id))
+                .expect("author baseline")
+                .is_empty()
+        );
+
+        db.create_comment("hello", CommentAuthor::User(second.id), "New")
+            .expect("new reader comment");
+        assert_eq!(
+            db.unread_comment_articles(CommentReader::Owner)
+                .expect("owner notifications"),
+            ["hello"]
+        );
+        assert_eq!(
+            db.unread_comment_articles(CommentReader::User(first.id))
+                .expect("reader notifications"),
+            ["hello"]
+        );
+        assert!(
+            db.unread_comment_articles(CommentReader::User(second.id))
+                .expect("author ignores own comment")
+                .is_empty()
+        );
+
+        db.mark_comments_read(CommentReader::Owner, "hello", i64::MAX)
+            .expect("mark owner read");
+        assert!(
+            db.unread_comment_articles(CommentReader::Owner)
+                .expect("read owner notifications")
+                .is_empty()
+        );
+        assert_eq!(
+            db.unread_comment_articles(CommentReader::User(first.id))
+                .expect("other reader stays unread"),
+            ["hello"]
+        );
+
+        db.create_comment("other", CommentAuthor::Owner, "Owner note")
+            .expect("owner comment");
+        assert!(
+            db.unread_comment_articles(CommentReader::Owner)
+                .expect("owner ignores own comments")
+                .is_empty()
+        );
+        assert_eq!(
+            db.unread_comment_articles(CommentReader::User(first.id))
+                .expect("reader sees both articles"),
+            ["other", "hello"]
+        );
     }
 }
