@@ -666,9 +666,40 @@
       }
 
       .comment-entry strong {
-        display: block;
-        margin-bottom: 3px;
+        min-width: 0;
         color: #315d82;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .comment-entry-heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 3px;
+      }
+
+      .comment-delete {
+        flex: 0 0 auto;
+        width: 24px;
+        height: 24px;
+        border: 1px solid #c9ced2;
+        border-radius: 999px;
+        padding: 0;
+        color: #7c302b;
+        background: #fff;
+        font: 700 17px/20px "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        cursor: pointer;
+        touch-action: manipulation;
+      }
+
+      .comment-delete:hover,
+      .comment-delete:focus-visible {
+        border-color: #a33b31;
+        color: #fff;
+        background: #a33b31;
+        outline: none;
       }
 
       #comment-modal[data-signed-in="false"] .signed-in-only {
@@ -889,9 +920,6 @@
         <a id="account-telegram-login" class="account-action signed-out-only" href="/api/auth/telegram/start">
           Continue with Telegram
         </a>
-        <button id="account-owner-login" class="account-action signed-out-only" type="button">
-          Owner sign in
-        </button>
         <label id="account-avatar-label" class="account-action signed-in-only reader-account-only" for="account-avatar-input">
           Change avatar
         </label>
@@ -903,8 +931,8 @@
     <div id="mobile-controls">
       <div class="mobile-article-actions" aria-label="Article controls">
         <button type="button" data-article-action="back">← Articles</button>
-        <button type="button" data-article-action="up" aria-label="Scroll article up">K ↑</button>
-        <button type="button" data-article-action="down" aria-label="Scroll article down">J ↓</button>
+        <button type="button" data-article-action="up" aria-label="Scroll article up">Up</button>
+        <button type="button" data-article-action="down" aria-label="Scroll article down">Down</button>
         <button type="button" data-article-action="comment">Comment</button>
       </div>
       <nav class="mobile-tab-actions" aria-label="Primary mobile navigation">
@@ -914,7 +942,15 @@
         <a href="/info" data-mobile-tab="info">Info</a>
       </nav>
     </div>
-    <div id="auth-modal" class="modal-overlay" data-mode="reader" hidden>
+    <div
+      id="auth-modal"
+      class="modal-overlay"
+      data-mode="reader"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="auth-title"
+      hidden
+    >
       <form id="auth-form" class="modal-card" data-action="login">
         <h2 id="auth-title">Reader account</h2>
         <div class="reader-only">
@@ -962,7 +998,14 @@
       <img id="image-viewer-image" alt="" />
       <p id="image-viewer-caption"></p>
     </div>
-    <div id="comment-modal" class="modal-overlay" hidden>
+    <div
+      id="comment-modal"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="comment-title"
+      hidden
+    >
       <form id="comment-form" class="modal-card">
         <h2 id="comment-title">Comments</h2>
         <div id="comment-list" class="comment-list"></div>

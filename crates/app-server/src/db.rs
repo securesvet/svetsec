@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 const SESSION_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
 const COMMENT_COOLDOWN_SECONDS: i64 = 10;
+const TELEGRAM_COMMENT_MODERATOR_KEY: &str = "telegram_comment_moderator_id";
 
 #[derive(Clone)]
 pub struct Database(Arc<Mutex<Connection>>);
@@ -159,6 +160,10 @@ impl Database {
                 next_path TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS site_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_telegram_login_attempts_expires
                 ON telegram_login_attempts(expires_at);
@@ -316,6 +321,7 @@ impl Database {
         telegram_id: &str,
         preferred_username: Option<&str>,
         external_avatar_url: Option<&str>,
+        claim_comment_moderator: bool,
     ) -> rusqlite::Result<User> {
         let mut connection = self.connection();
         let transaction = connection.transaction()?;
@@ -355,8 +361,30 @@ impl Database {
                 avatar_revision: None,
             }
         };
+        if claim_comment_moderator {
+            transaction.execute(
+                "INSERT OR IGNORE INTO site_settings(key, value) VALUES (?1, ?2)",
+                params![TELEGRAM_COMMENT_MODERATOR_KEY, telegram_id],
+            )?;
+        }
         transaction.commit()?;
         Ok(user)
+    }
+
+    pub fn user_can_moderate_comments(&self, user_id: i64) -> rusqlite::Result<bool> {
+        self.connection()
+            .query_row(
+                "SELECT 1
+                 FROM users
+                 JOIN site_settings
+                   ON site_settings.key = ?1
+                  AND site_settings.value = users.telegram_id
+                 WHERE users.id = ?2",
+                params![TELEGRAM_COMMENT_MODERATOR_KEY, user_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .map(Option::unwrap_or_default)
     }
 
     pub fn set_user_avatar(
@@ -517,6 +545,14 @@ impl Database {
                 comment_from_row,
             )
             .map_err(Into::into)
+    }
+
+    pub fn delete_comment(&self, article_slug: &str, comment_id: i64) -> rusqlite::Result<bool> {
+        let changed = self.connection().execute(
+            "DELETE FROM comments WHERE article_slug = ?1 AND id = ?2",
+            params![article_slug, comment_id],
+        )?;
+        Ok(changed == 1)
     }
 
     pub fn list_articles(&self, include_drafts: bool) -> rusqlite::Result<Vec<Article>> {
@@ -753,11 +789,27 @@ mod tests {
             .create_comment("hello", CommentAuthor::User(user.id), "First!")
             .expect("comment");
         assert_eq!(comment.author, "Reader");
-        assert_eq!(db.list_comments("hello").expect("comments"), [comment]);
+        assert_eq!(
+            db.list_comments("hello").expect("comments"),
+            std::slice::from_ref(&comment)
+        );
         assert!(matches!(
             db.create_comment("hello", CommentAuthor::User(user.id), "Too soon"),
             Err(CreateCommentError::RateLimited)
         ));
+        assert!(
+            !db.delete_comment("other", comment.id)
+                .expect("wrong article")
+        );
+        assert!(
+            db.delete_comment("hello", comment.id)
+                .expect("delete comment")
+        );
+        assert!(
+            !db.delete_comment("hello", comment.id)
+                .expect("already deleted")
+        );
+        assert!(db.list_comments("hello").expect("comments").is_empty());
 
         db.save_article(&ArticleInput {
             slug: "hello".into(),
@@ -799,7 +851,12 @@ mod tests {
         );
 
         let user = db
-            .upsert_telegram_user("123456789", None, Some("https://example.com/avatar.jpg"))
+            .upsert_telegram_user(
+                "123456789",
+                None,
+                Some("https://example.com/avatar.jpg"),
+                false,
+            )
             .expect("Telegram user");
         assert_eq!(user.username, "telegram_123456789");
         assert_eq!(
@@ -807,10 +864,22 @@ mod tests {
             Some("https://example.com/avatar.jpg")
         );
         let same_user = db
-            .upsert_telegram_user("123456789", Some("svetsec"), None)
+            .upsert_telegram_user("123456789", Some("svetsec"), None, true)
             .expect("existing Telegram user");
         assert_eq!(same_user.id, user.id);
         assert_eq!(same_user.username, "svetsec");
+        assert!(
+            db.user_can_moderate_comments(same_user.id)
+                .expect("moderator lookup")
+        );
+
+        let other_user = db
+            .upsert_telegram_user("987654321", Some("other"), None, true)
+            .expect("other Telegram user");
+        assert!(
+            !db.user_can_moderate_comments(other_user.id)
+                .expect("moderator cannot be replaced")
+        );
 
         let updated = db
             .set_user_avatar(user.id, b"normalized-image", "image/jpeg")

@@ -37,6 +37,7 @@ web-sys = { workspace = true, features = [
     "HtmlTextAreaElement",
     "KeyboardEvent",
     "Location",
+    "MediaQueryList",
     "MouseEvent",
     "Navigator",
     "Node",

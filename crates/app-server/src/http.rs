@@ -7,7 +7,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -44,6 +44,7 @@ struct SessionState {
     username: Option<String>,
     avatar_url: Option<String>,
     telegram_enabled: bool,
+    can_moderate_comments: bool,
 }
 
 #[derive(Deserialize)]
@@ -167,6 +168,10 @@ pub async fn serve(
             "/api/articles/{slug}/comments",
             get(comments).post(add_comment),
         )
+        .route(
+            "/api/articles/{slug}/comments/{comment_id}",
+            delete(remove_comment),
+        )
         .route("/api/github/articles", get(github_articles))
         .route("/api/github/articles/{slug}", get(github_article))
         .route(
@@ -215,6 +220,7 @@ async fn login(
             username: None,
             avatar_url: Some("/assets/profile.jpg".into()),
             telegram_enabled: state.telegram.is_some(),
+            can_moderate_comments: true,
         },
         &token,
         state.secure_cookie,
@@ -244,6 +250,7 @@ async fn register(
             username: Some(user.username),
             avatar_url,
             telegram_enabled: state.telegram.is_some(),
+            can_moderate_comments: false,
         },
         &token,
         state.secure_cookie,
@@ -267,6 +274,10 @@ async fn user_login(
         .db
         .create_user_session(&token, credentials.user.id)
         .map_err(internal)?;
+    let can_moderate_comments = state
+        .db
+        .user_can_moderate_comments(credentials.user.id)
+        .map_err(internal)?;
     let avatar_url = credentials.user.avatar_url();
     session_with_cookie(
         SessionState {
@@ -274,6 +285,7 @@ async fn user_login(
             username: Some(credentials.user.username),
             avatar_url,
             telegram_enabled: state.telegram.is_some(),
+            can_moderate_comments,
         },
         &token,
         state.secure_cookie,
@@ -364,12 +376,21 @@ async fn telegram_callback(
         .exchange(code, attempt.code_verifier, attempt.nonce)
         .await
         .map_err(telegram_error)?;
+    let claim_comment_moderator = profile
+        .verified_username
+        .as_deref()
+        .is_some_and(|username| {
+            username
+                .trim_start_matches('@')
+                .eq_ignore_ascii_case("svetsec")
+        });
     let user = state
         .db
         .upsert_telegram_user(
             &profile.id,
             profile.username.as_deref(),
             profile.picture.as_deref(),
+            claim_comment_moderator,
         )
         .map_err(registration_error)?;
     let token = new_session_token();
@@ -419,12 +440,17 @@ async fn upload_avatar(
         .db
         .set_user_avatar(user.id, &encoded, "image/jpeg")
         .map_err(internal)?;
+    let can_moderate_comments = state
+        .db
+        .user_can_moderate_comments(user.id)
+        .map_err(internal)?;
     let avatar_url = user.avatar_url();
     Ok(Json(SessionState {
         authenticated: false,
         username: Some(user.username),
         avatar_url,
         telegram_enabled: state.telegram.is_some(),
+        can_moderate_comments,
     }))
 }
 
@@ -514,6 +540,35 @@ async fn add_comment(
     Ok((StatusCode::CREATED, Json(comment)))
 }
 
+async fn remove_comment(
+    State(state): State<HttpState>,
+    Path((slug, comment_id)): Path<(String, i64)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    validate_slug(&slug)?;
+    if comment_id < 1 {
+        return Err(ApiError(StatusCode::NOT_FOUND, "comment not found"));
+    }
+    let identity = identity(&state, token_from(&headers).as_deref(), true)?;
+    if !identity.owner && identity.user.is_none() {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "login required"));
+    }
+    if !identity_can_moderate_comments(&state, &identity)? {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "comment moderator session required",
+        ));
+    }
+    if !state
+        .db
+        .delete_comment(&slug, comment_id)
+        .map_err(internal)?
+    {
+        return Err(ApiError(StatusCode::NOT_FOUND, "comment not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn github_articles(
     State(state): State<HttpState>,
     Query(query): Query<GithubListQuery>,
@@ -595,6 +650,7 @@ fn state_response(
     touch: bool,
 ) -> Result<Json<SessionState>, ApiError> {
     let identity = identity(state, token, touch)?;
+    let can_moderate_comments = identity_can_moderate_comments(state, &identity)?;
     Ok(Json(SessionState {
         authenticated: identity.owner,
         username: identity.user.as_ref().map(|user| user.username.clone()),
@@ -604,7 +660,24 @@ fn state_response(
             identity.user.and_then(|user| user.avatar_url())
         },
         telegram_enabled: state.telegram.is_some(),
+        can_moderate_comments,
     }))
+}
+
+fn identity_can_moderate_comments(
+    state: &HttpState,
+    identity: &Identity,
+) -> Result<bool, ApiError> {
+    if identity.owner {
+        return Ok(true);
+    }
+    identity
+        .user
+        .as_ref()
+        .map(|user| state.db.user_can_moderate_comments(user.id))
+        .transpose()
+        .map(Option::unwrap_or_default)
+        .map_err(internal)
 }
 
 fn authenticated(state: &HttpState, headers: &HeaderMap) -> Result<bool, ApiError> {

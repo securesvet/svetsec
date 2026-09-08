@@ -160,6 +160,8 @@ struct DomSignature {
     username: Option<String>,
     avatar_url: Option<String>,
     telegram_login_enabled: bool,
+    can_moderate_comments: bool,
+    keyboard_hints_hidden: bool,
     comments_len: usize,
     comments_loading: bool,
     comments_error: bool,
@@ -268,6 +270,8 @@ impl DomSignature {
             username: app.username().map(str::to_owned),
             avatar_url: app.avatar_url().map(str::to_owned),
             telegram_login_enabled: app.telegram_login_enabled(),
+            can_moderate_comments: app.can_moderate_comments(),
+            keyboard_hints_hidden: app.keyboard_hints_hidden(),
             comments_len: app.comments().len(),
             comments_loading: app.comments_loading(),
             comments_error: app.comments_error().is_some(),
@@ -422,6 +426,7 @@ fn main() -> io::Result<()> {
     if let Some(language) = stored_language() {
         initial_app.restore_language(language);
     }
+    initial_app.set_keyboard_hints_hidden(mobile_controls_layout());
     let _ = initial_app.update(Message::SelectTab(initial_route.tab()));
     initial_app.set_profile_image(ArticleImage {
         source: "/assets/profile.jpg".into(),
@@ -443,7 +448,7 @@ fn main() -> io::Result<()> {
     let backend = ViewportDomBackend::new_by_id("terminal")?;
     let mut terminal = Terminal::new(backend)?;
     let full_redraw_required = Rc::new(Cell::new(false));
-    install_full_redraw_on_resize(Rc::clone(&full_redraw_required))
+    install_full_redraw_on_resize(Rc::clone(&full_redraw_required), Rc::clone(&app))
         .map_err(|error| io::Error::other(format!("resize recovery setup failed: {error:?}")))?;
     install_browser_events(
         Rc::clone(&app),
@@ -560,14 +565,30 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn install_full_redraw_on_resize(redraw_required: Rc<Cell<bool>>) -> Result<(), JsValue> {
+fn install_full_redraw_on_resize(
+    redraw_required: Rc<Cell<bool>>,
+    app: Rc<RefCell<App>>,
+) -> Result<(), JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("window unavailable"))?;
     let resize = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+        app.borrow_mut()
+            .set_keyboard_hints_hidden(mobile_controls_layout());
         redraw_required.set(true);
     });
     window.add_event_listener_with_callback("resize", resize.as_ref().unchecked_ref())?;
     resize.forget();
     Ok(())
+}
+
+fn mobile_controls_layout() -> bool {
+    web_sys::window()
+        .and_then(|window| {
+            window
+                .match_media("(max-width: 700px), (pointer: coarse)")
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|query| query.matches())
 }
 
 fn structural_dom_transition(previous: &DomSignature, next: &DomSignature) -> bool {
@@ -821,17 +842,13 @@ fn sync_mobile_controls(app: &App) -> Result<(), JsValue> {
         )?;
     }
     if let Some(back) = controls.query_selector("[data-article-action=\"back\"]")? {
-        back.set_text_content(Some(match app.language() {
-            svetsec_core::Language::En => "← Articles",
-            svetsec_core::Language::Ru => "← Статьи",
-        }));
+        back.set_text_content(Some("← Articles"));
     }
     if let Some(comment) = controls.query_selector("[data-article-action=\"comment\"]")? {
-        comment.set_text_content(Some(match (app.signed_in(), app.language()) {
-            (true, svetsec_core::Language::En) => "Comment",
-            (true, svetsec_core::Language::Ru) => "Написать",
-            (false, svetsec_core::Language::En) => "Sign in",
-            (false, svetsec_core::Language::Ru) => "Войти",
+        comment.set_text_content(Some(if app.signed_in() {
+            "Comment"
+        } else {
+            "Sign in"
         }));
     }
     for (tab, selector) in [
@@ -887,10 +904,7 @@ fn sync_browser_account(area: ratzilla::ratatui::layout::Rect, app: &App) -> Res
         } else if let Some(username) = app.username() {
             format!("@{username}")
         } else {
-            match app.language() {
-                svetsec_core::Language::En => "Login".into(),
-                svetsec_core::Language::Ru => "Войти".into(),
-            }
+            "Login".into()
         };
         name.set_text_content(Some(&label));
     }
@@ -926,25 +940,10 @@ fn sync_browser_account(area: ratzilla::ratatui::layout::Rect, app: &App) -> Res
         &login_url,
     )?;
 
-    let (telegram, owner, avatar, logout) = match app.language() {
-        svetsec_core::Language::En => (
-            "Continue with Telegram",
-            "Owner sign in",
-            "Change avatar",
-            "Log out",
-        ),
-        svetsec_core::Language::Ru => (
-            "Продолжить с Telegram",
-            "Вход владельца",
-            "Сменить аватар",
-            "Выйти",
-        ),
-    };
     for (id, text) in [
-        ("account-telegram-login", telegram),
-        ("account-owner-login", owner),
-        ("account-avatar-label", avatar),
-        ("account-logout", logout),
+        ("account-telegram-login", "Continue with Telegram"),
+        ("account-avatar-label", "Change avatar"),
+        ("account-logout", "Log out"),
     ] {
         if let Some(element) = document.get_element_by_id(id) {
             element.set_text_content(Some(text));
@@ -1036,7 +1035,7 @@ fn sync_browser_comments(area: ratzilla::ratatui::layout::Rect, app: &App) -> Re
         panel.append_child(&message)?;
     } else {
         for comment in app.comments() {
-            append_comment_entry(&document, &panel, comment)?;
+            append_comment_entry(&document, &panel, comment, app.can_moderate_comments())?;
         }
     }
     panel.remove_attribute("hidden")?;
@@ -1048,14 +1047,29 @@ fn append_comment_entry(
     document: &web_sys::Document,
     parent: &web_sys::Element,
     comment: &Comment,
+    can_delete: bool,
 ) -> Result<(), JsValue> {
     let entry = document.create_element("article")?;
+    let heading = document.create_element("div")?;
     let author = document.create_element("strong")?;
     let body = document.create_element("div")?;
     entry.set_class_name("comment-entry");
+    heading.set_class_name("comment-entry-heading");
     author.set_text_content(Some(&format!("@{}", comment.author)));
     body.set_text_content(Some(&comment.body));
-    entry.append_child(&author)?;
+    heading.append_child(&author)?;
+    if can_delete {
+        let button = document.create_element("button")?;
+        let label = "Delete comment";
+        button.set_class_name("comment-delete");
+        button.set_attribute("type", "button")?;
+        button.set_attribute("data-comment-delete", &comment.id.to_string())?;
+        button.set_attribute("aria-label", label)?;
+        button.set_attribute("title", label)?;
+        button.set_text_content(Some("×"));
+        heading.append_child(&button)?;
+    }
+    entry.append_child(&heading)?;
     entry.append_child(&body)?;
     parent.append_child(&entry)?;
     Ok(())
@@ -1738,13 +1752,13 @@ fn install_browser_events(
 
     let key_app = Rc::clone(&app);
     let keydown = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
+        if event.key() == "Escape" && overlay_or_account_menu_open() {
+            event.prevent_default();
+            event.stop_propagation();
+            close_all_overlays();
+            return;
+        }
         if modal_open() {
-            if event.key() == "Escape" {
-                hide_modal("auth-modal");
-                hide_modal("comment-modal");
-                hide_modal("image-viewer");
-                hide_account_menu();
-            }
             return;
         }
         if event.meta_key() || event.ctrl_key() || event.alt_key() {
@@ -1755,7 +1769,11 @@ fn install_browser_events(
             handle_key(Rc::clone(&key_app), code);
         }
     });
-    window.add_event_listener_with_callback("keydown", keydown.as_ref().unchecked_ref())?;
+    window.add_event_listener_with_callback_and_bool(
+        "keydown",
+        keydown.as_ref().unchecked_ref(),
+        true,
+    )?;
     keydown.forget();
 
     let move_app = Rc::clone(&app);
@@ -2325,6 +2343,7 @@ fn show_image_viewer(source: &str, alt: &str) {
     let Some(viewer) = document.get_element_by_id("image-viewer") else {
         return;
     };
+    close_all_overlays();
     if let Some(image) = document.get_element_by_id("image-viewer-image") {
         let _ = image.set_attribute("src", source);
         let _ = image.set_attribute("alt", alt);
@@ -2471,6 +2490,7 @@ struct SessionState {
     username: Option<String>,
     avatar_url: Option<String>,
     telegram_enabled: bool,
+    can_moderate_comments: bool,
 }
 
 fn apply_session_state(app: &Rc<RefCell<App>>, state: SessionState) {
@@ -2479,6 +2499,7 @@ fn apply_session_state(app: &Rc<RefCell<App>>, state: SessionState) {
     app.set_user(state.username);
     app.set_avatar_url(state.avatar_url);
     app.set_telegram_login_enabled(state.telegram_enabled);
+    app.set_can_moderate_comments(state.can_moderate_comments);
 }
 
 fn install_account_events(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
@@ -2494,10 +2515,9 @@ fn install_account_events(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
         let toggle = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
             event.prevent_default();
             let opening = menu_for_click.has_attribute("hidden");
+            close_all_overlays();
             if opening {
                 let _ = menu_for_click.remove_attribute("hidden");
-            } else {
-                let _ = menu_for_click.set_attribute("hidden", "");
             }
             let _ = trigger_for_click
                 .set_attribute("aria-expanded", if opening { "true" } else { "false" });
@@ -2505,17 +2525,6 @@ fn install_account_events(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
         });
         trigger.add_event_listener_with_callback("click", toggle.as_ref().unchecked_ref())?;
         toggle.forget();
-    }
-
-    if let Some(button) = document.get_element_by_id("account-owner-login") {
-        let owner_app = Rc::clone(&app);
-        let open = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
-            event.prevent_default();
-            hide_account_menu();
-            show_auth_modal(true, false, owner_app.borrow().language());
-        });
-        button.add_event_listener_with_callback("click", open.as_ref().unchecked_ref())?;
-        open.forget();
     }
 
     if let Some(button) = document.get_element_by_id("account-logout") {
@@ -2719,31 +2728,73 @@ fn install_account_events(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
         let Some(button) = close_buttons.item(index) else {
             continue;
         };
-        let Some(id) = button
-            .dyn_ref::<web_sys::Element>()
-            .and_then(|button| button.get_attribute("data-modal-close"))
-        else {
-            continue;
-        };
         let close = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
             event.prevent_default();
-            hide_modal(&id);
+            close_all_overlays();
         });
         button.add_event_listener_with_callback("click", close.as_ref().unchecked_ref())?;
         close.forget();
     }
-    if let Some(viewer) = document.get_element_by_id("image-viewer") {
+    for id in MODAL_IDS {
+        let Some(overlay) = document.get_element_by_id(id) else {
+            continue;
+        };
+        let id = id.to_owned();
         let close = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
             let clicked_backdrop = event
                 .target()
                 .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-                .is_some_and(|target| target.id() == "image-viewer");
+                .is_some_and(|target| target.id() == id);
             if clicked_backdrop {
-                hide_modal("image-viewer");
+                event.prevent_default();
+                close_all_overlays();
             }
         });
-        viewer.add_event_listener_with_callback("click", close.as_ref().unchecked_ref())?;
+        overlay.add_event_listener_with_callback("click", close.as_ref().unchecked_ref())?;
         close.forget();
+    }
+    if document.get_element_by_id("web-account").is_some() {
+        let close = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            let clicked_account = event
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                .and_then(|target| target.closest("#web-account").ok().flatten())
+                .is_some();
+            if !clicked_account {
+                hide_account_menu();
+            }
+        });
+        document.add_event_listener_with_callback("click", close.as_ref().unchecked_ref())?;
+        close.forget();
+    }
+    install_comment_delete_events(&document, app)?;
+    Ok(())
+}
+
+fn install_comment_delete_events(
+    document: &web_sys::Document,
+    app: Rc<RefCell<App>>,
+) -> Result<(), JsValue> {
+    for id in ["web-comments-panel", "comment-list"] {
+        let Some(container) = document.get_element_by_id(id) else {
+            continue;
+        };
+        let delete_app = Rc::clone(&app);
+        let click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            let comment_id = event
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                .and_then(|target| target.get_attribute("data-comment-delete"))
+                .and_then(|value| value.parse::<i64>().ok());
+            let Some(comment_id) = comment_id else {
+                return;
+            };
+            event.prevent_default();
+            event.stop_propagation();
+            begin_delete_comment(Rc::clone(&delete_app), comment_id);
+        });
+        container.add_event_listener_with_callback("click", click.as_ref().unchecked_ref())?;
+        click.forget();
     }
     Ok(())
 }
@@ -2755,6 +2806,7 @@ fn show_auth_modal(owner: bool, register: bool, language: svetsec_core::Language
     let Some(modal) = document.get_element_by_id("auth-modal") else {
         return;
     };
+    close_all_overlays();
     let _ = modal.set_attribute("data-mode", if owner { "owner" } else { "reader" });
     let _ = document.get_element_by_id("auth-form").and_then(|form| {
         form.set_attribute("data-action", if register { "register" } else { "login" })
@@ -2831,10 +2883,10 @@ fn localize_account_modals(document: &web_sys::Document, language: svetsec_core:
         svetsec_core::Language::Ru => [
             ("auth-username-label", "Имя пользователя"),
             ("auth-password-label", "Пароль"),
-            ("auth-login", "Войти"),
-            ("auth-register", "Регистрация"),
-            ("auth-cancel", "Отмена"),
-            ("telegram-login", "Продолжить с Telegram"),
+            ("auth-login", "Sign in"),
+            ("auth-register", "Register"),
+            ("auth-cancel", "Cancel"),
+            ("telegram-login", "Continue with Telegram"),
             (
                 "telegram-login-help",
                 "Отдельный пароль сайта не сохраняется.",
@@ -2844,10 +2896,10 @@ fn localize_account_modals(document: &web_sys::Document, language: svetsec_core:
                 "Имя: 3–24 латинских символа (A–Z, 0–9, _ или -). Пароль: 8–128 символов. guest, owner и svetsec зарезервированы.",
             ),
             ("comment-title", "Комментарии"),
-            ("comment-sign-in", "Войти / зарегистрироваться"),
+            ("comment-sign-in", "Sign in / register"),
             ("comment-message-label", "Сообщение"),
-            ("comment-publish", "Опубликовать"),
-            ("comment-cancel", "Отмена"),
+            ("comment-publish", "Publish"),
+            ("comment-cancel", "Cancel"),
         ],
     };
     for (id, text) in texts {
@@ -2864,6 +2916,7 @@ fn begin_comment(app: Rc<RefCell<App>>) {
     let Some(modal) = document.get_element_by_id("comment-modal") else {
         return;
     };
+    close_all_overlays();
     localize_account_modals(&document, app.borrow().language());
     populate_comment_modal(&document, &app.borrow());
     set_modal_error("comment-error", "");
@@ -2925,8 +2978,59 @@ fn populate_comment_modal(document: &web_sys::Document, app: &App) {
         return;
     }
     for comment in app.comments() {
-        let _ = append_comment_entry(document, &list, comment);
+        let _ = append_comment_entry(document, &list, comment, app.can_moderate_comments());
     }
+}
+
+fn begin_delete_comment(app: Rc<RefCell<App>>, comment_id: i64) {
+    let (slug, language, can_moderate) = {
+        let app = app.borrow();
+        (
+            app.opened_article().map(|article| article.slug.clone()),
+            app.language(),
+            app.can_moderate_comments(),
+        )
+    };
+    let Some(slug) = slug else {
+        return;
+    };
+    if !can_moderate {
+        return;
+    }
+    let question = match language {
+        svetsec_core::Language::En => "Delete this comment permanently?",
+        svetsec_core::Language::Ru => "Удалить этот комментарий безвозвратно?",
+    };
+    let confirmed = web_sys::window()
+        .and_then(|window| window.confirm_with_message(question).ok())
+        .unwrap_or(false);
+    if !confirmed {
+        return;
+    }
+
+    set_modal_error(
+        "comment-error",
+        match language {
+            svetsec_core::Language::En => "Deleting…",
+            svetsec_core::Language::Ru => "Удаление…",
+        },
+    );
+    spawn_local(async move {
+        let url = format!("/api/articles/{slug}/comments/{comment_id}");
+        match request("DELETE", &url, None).await {
+            Ok(_) => {
+                set_modal_error("comment-error", "");
+                load_comments(app);
+            }
+            Err(error) => {
+                let message = js_error_message(&error);
+                set_modal_error("comment-error", &message);
+                if let Some(window) = web_sys::window() {
+                    let _ = window.alert_with_message(&message);
+                }
+            }
+        }
+    });
 }
 
 fn logout(app: Rc<RefCell<App>>) {
@@ -2939,6 +3043,7 @@ fn logout(app: Rc<RefCell<App>>) {
                     username: None,
                     avatar_url: None,
                     telegram_enabled: app.borrow().telegram_login_enabled(),
+                    can_moderate_comments: false,
                 },
             );
             refresh_comment_modal(&app);
@@ -2946,18 +3051,33 @@ fn logout(app: Rc<RefCell<App>>) {
     });
 }
 
+const MODAL_IDS: [&str; 3] = ["auth-modal", "comment-modal", "image-viewer"];
+
 fn modal_open() -> bool {
     web_sys::window()
         .and_then(|window| window.document())
         .is_some_and(|document| {
-            ["auth-modal", "comment-modal", "image-viewer"]
-                .into_iter()
-                .any(|id| {
-                    document
-                        .get_element_by_id(id)
-                        .is_some_and(|modal| !modal.has_attribute("hidden"))
-                })
+            MODAL_IDS.into_iter().any(|id| {
+                document
+                    .get_element_by_id(id)
+                    .is_some_and(|modal| !modal.has_attribute("hidden"))
+            })
         })
+}
+
+fn overlay_or_account_menu_open() -> bool {
+    modal_open()
+        || web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id("account-menu"))
+            .is_some_and(|menu| !menu.has_attribute("hidden"))
+}
+
+fn close_all_overlays() {
+    for id in MODAL_IDS {
+        hide_modal(id);
+    }
+    hide_account_menu();
 }
 
 fn hide_account_menu() {
@@ -3066,11 +3186,16 @@ fn session_state_from_json(json: &JsValue) -> Result<SessionState, JsValue> {
     let telegram_enabled = js_sys::Reflect::get(json, &JsValue::from_str("telegram_enabled"))?
         .as_bool()
         .unwrap_or(false);
+    let can_moderate_comments =
+        js_sys::Reflect::get(json, &JsValue::from_str("can_moderate_comments"))?
+            .as_bool()
+            .unwrap_or(false);
     Ok(SessionState {
         authenticated,
         username,
         avatar_url,
         telegram_enabled,
+        can_moderate_comments,
     })
 }
 
@@ -3610,6 +3735,14 @@ mod tests {
         assert!(html.contains("overscroll-behavior: contain"));
         assert!(html.contains("id=\"image-viewer\""));
         assert!(html.contains("id=\"web-account\""));
+        assert!(html.contains("aria-labelledby=\"auth-title\""));
+        assert!(html.contains("aria-labelledby=\"comment-title\""));
+        assert!(!html.contains("id=\"account-owner-login\""));
+        assert!(html.contains(".comment-delete:hover"));
+        assert!(html.contains(">Up</button>"));
+        assert!(html.contains(">Down</button>"));
+        assert!(!html.contains(">K ↑</button>"));
+        assert!(!html.contains(">J ↓</button>"));
         assert_eq!(rendered_scroll_top(3, 19.5), 58.5);
         assert_eq!(native_scroll_row(58.4, 19.5, 20), 2);
         assert_eq!(native_scroll_row(58.5, 19.5, 20), 3);

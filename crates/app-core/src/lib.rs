@@ -117,16 +117,12 @@ impl Tab {
     }
 
     #[must_use]
-    pub const fn label(self, language: Language) -> &'static str {
-        match (self, language) {
-            (Self::Main, Language::En) => "Main",
-            (Self::Articles, Language::En) => "Articles",
-            (Self::Projects, Language::En) => "Projects",
-            (Self::Info, Language::En) => "Info",
-            (Self::Main, Language::Ru) => "Главная",
-            (Self::Articles, Language::Ru) => "Статьи",
-            (Self::Projects, Language::Ru) => "Проекты",
-            (Self::Info, Language::Ru) => "О сайте",
+    pub const fn label(self, _language: Language) -> &'static str {
+        match self {
+            Self::Main => "Main",
+            Self::Articles => "Articles",
+            Self::Projects => "Projects",
+            Self::Info => "Info",
         }
     }
 
@@ -379,6 +375,8 @@ pub struct App {
     username: Option<String>,
     avatar_url: Option<String>,
     telegram_login_enabled: bool,
+    can_moderate_comments: bool,
+    keyboard_hints_hidden: bool,
     comments: Vec<Comment>,
     comments_loading: bool,
     comments_error: Option<String>,
@@ -461,6 +459,24 @@ impl App {
 
     pub fn set_telegram_login_enabled(&mut self, enabled: bool) {
         self.telegram_login_enabled = enabled;
+    }
+
+    #[must_use]
+    pub const fn can_moderate_comments(&self) -> bool {
+        self.can_moderate_comments
+    }
+
+    pub fn set_can_moderate_comments(&mut self, can_moderate: bool) {
+        self.can_moderate_comments = can_moderate;
+    }
+
+    #[must_use]
+    pub const fn keyboard_hints_hidden(&self) -> bool {
+        self.keyboard_hints_hidden
+    }
+
+    pub fn set_keyboard_hints_hidden(&mut self, hidden: bool) {
+        self.keyboard_hints_hidden = hidden;
     }
 
     #[must_use]
@@ -722,6 +738,7 @@ impl App {
             summary.labels.clone_from(&article.labels);
         }
         self.opened_article = Some(article);
+        self.hovered = None;
         self.article_loading = false;
         self.articles_error = None;
         self.article_scroll = 0;
@@ -779,12 +796,17 @@ impl App {
             Message::NextTab => {
                 let next = (self.selected.index() + 1) % Tab::ALL.len();
                 self.selected = Tab::ALL[next];
+                self.hovered = None;
             }
             Message::PreviousTab => {
                 let previous = (self.selected.index() + Tab::ALL.len() - 1) % Tab::ALL.len();
                 self.selected = Tab::ALL[previous];
+                self.hovered = None;
             }
-            Message::SelectTab(tab) => self.selected = tab,
+            Message::SelectTab(tab) => {
+                self.selected = tab;
+                self.hovered = None;
+            }
             Message::SelectLanguage(language) => {
                 self.language = language;
                 self.show_language_notice();
@@ -860,6 +882,7 @@ impl App {
             }
             Message::CloseArticle => {
                 self.opened_article = None;
+                self.hovered = None;
                 self.article_scroll = 0;
                 self.article_scroll_limit = 0;
                 self.article_cursor = 0;
@@ -1273,11 +1296,43 @@ mod tests {
     }
 
     #[test]
+    fn navigation_clears_help_from_the_previous_screen() {
+        let mut app = App::default();
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        let _ = app.update(Message::Hover(Some(HelpTarget::Articles)));
+        let _ = app.update(Message::SelectTab(Tab::Main));
+        assert_eq!(app.hovered(), None);
+
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_opened_article(ArticleContent {
+            slug: "hello".into(),
+            title: "Hello".into(),
+            markdown: "Text".into(),
+            images: Vec::new(),
+            labels: Vec::new(),
+        });
+        let _ = app.update(Message::Hover(Some(HelpTarget::ArticleBack)));
+        let _ = app.update(Message::CloseArticle);
+        assert_eq!(app.hovered(), None);
+    }
+
+    #[test]
+    fn control_labels_stay_english_in_russian_content_mode() {
+        assert_eq!(Tab::Main.label(Language::Ru), "Main");
+        assert_eq!(Tab::Articles.label(Language::Ru), "Articles");
+        assert_eq!(Tab::Projects.label(Language::Ru), "Projects");
+        assert_eq!(Tab::Info.label(Language::Ru), "Info");
+    }
+
+    #[test]
     fn reader_identity_and_article_comments_have_explicit_loading_state() {
         let mut app = App::default();
         app.set_user(Some("reader".into()));
         assert!(app.signed_in());
         assert!(!app.authenticated());
+        assert!(!app.can_moderate_comments());
+        app.set_can_moderate_comments(true);
+        assert!(app.can_moderate_comments());
         app.set_opened_article(ArticleContent {
             slug: "hello".into(),
             title: "Hello".into(),

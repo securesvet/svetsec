@@ -16,6 +16,10 @@ adds SQLite-backed accounts, sessions, article comments, and articles.
 - Visitors can register a username and password, log in, and leave comments on
   articles. Reader passwords use the same salted Argon2id storage, and comments
   are rate-limited server-side.
+- The password-backed owner and the Telegram account whose verified username is
+  `svetsec` can delete comments. The Telegram moderator role is bound to that
+  account's immutable Telegram ID, so changing a visible username cannot move
+  the role to another account.
 - SSH identifies the owner by username plus a verified public key. Other
   visitors can use a guest session or authenticate with a registered username
   and password to comment.
@@ -34,7 +38,8 @@ adds SQLite-backed accounts, sessions, article comments, and articles.
   articles use native browser wheel/touch scrolling, expose a real scrollbar,
   and constrain text selection to the paragraph or code block where the drag
   started. They also have a visible Back action plus large touch controls on
-  phones.
+  phones. Touch controls stay in English, and mobile layouts omit keyboard
+  shortcut hints while the terminal and SSH versions retain them.
 - Markdown images keep their original quality in the browser and use compact
   true-color previews over SSH.
 - Article frontmatter provides colored labels. Python fences from the selected
@@ -212,6 +217,8 @@ presence table, but that table is no longer read or updated.
 - `POST /api/users`: register and start a reader session
 - `POST /api/users/session`: log into a reader session
 - `GET/POST /api/articles/:slug/comments`: list or add article comments
+- `DELETE /api/articles/:slug/comments/:id`: delete a comment; owner or bound
+  Telegram moderator session required
 - `GET /api/articles`: published articles for guests, drafts included for owner
 - `POST /api/articles`: create/update by slug; owner session required
 - `GET /resume`: serve the generated PDF at the short public URL

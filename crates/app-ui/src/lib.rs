@@ -35,12 +35,10 @@ const SIDEBAR_BREAKPOINT: u16 = 76;
 const SIDEBAR_MIN_HEIGHT: u16 = 18;
 const RESUME_LINK_LABEL: &str = "svetsec.ru/resume";
 
-const fn resume_prefix(language: Language, compact: bool) -> &'static str {
-    match (language, compact) {
-        (Language::En, false) => "Resume PDF  ",
-        (Language::Ru, false) => "Резюме PDF  ",
-        (Language::En, true) => "Resume  ",
-        (Language::Ru, true) => "Резюме  ",
+const fn resume_prefix(_language: Language, compact: bool) -> &'static str {
+    match compact {
+        false => "Resume PDF  ",
+        true => "Resume  ",
     }
 }
 
@@ -444,11 +442,7 @@ pub fn article_back_area(area: Rect, app: &App) -> Option<Rect> {
     (app.selected() == Tab::Articles && app.opened_article().is_some()).then(|| {
         let (panel, compact) = primary_panel_area(area);
         let horizontal_padding = if compact { 1 } else { 2 };
-        let label_width = match app.language() {
-            Language::En => "← Back".chars().count(),
-            Language::Ru => "← Назад".chars().count(),
-        }
-        .min(usize::from(u16::MAX)) as u16;
+        let label_width = "← Back".chars().count().min(usize::from(u16::MAX)) as u16;
         Rect::new(
             panel.left().saturating_add(1 + horizontal_padding),
             panel.top().saturating_add(2),
@@ -933,10 +927,7 @@ fn render_header(frame: &mut Frame<'_>, layout: &UiLayout, app: &App) {
     } else if let Some(username) = app.username() {
         format!("@{username}")
     } else {
-        match app.language() {
-            Language::En => "LOGIN".to_owned(),
-            Language::Ru => "ВОЙТИ".to_owned(),
-        }
+        "LOGIN".to_owned()
     };
     frame.render_widget(
         Paragraph::new(account)
@@ -1290,14 +1281,13 @@ fn render_articles_panel(frame: &mut Frame<'_>, area: Rect, app: &App, compact: 
                 }
             }
         }
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            match app.language() {
-                Language::En => "j/k select · Enter/o open · e edit · n new · f reload",
-                Language::Ru => "о/л выбор · Enter/щ открыть · у правка · т новая · а обновить",
-            },
-            Style::new().fg(MUTED),
-        )));
+        if !app.keyboard_hints_hidden() {
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                "j/k select · Enter/o open · e edit · n new · f reload",
+                Style::new().fg(MUTED),
+            )));
+        }
     }
 
     let block = Block::new()
@@ -1347,14 +1337,9 @@ fn render_open_article_panel(
         .saturating_sub(bottom_padding);
     let width = right.saturating_sub(left);
 
-    let back = match (
-        app.language(),
-        app.hovered() == Some(HelpTarget::ArticleBack),
-    ) {
-        (Language::En, false) => "← Back",
-        (Language::En, true) => "← BACK",
-        (Language::Ru, false) => "← Назад",
-        (Language::Ru, true) => "← НАЗАД",
+    let back = match app.hovered() == Some(HelpTarget::ArticleBack) {
+        false => "← Back",
+        true => "← BACK",
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1388,27 +1373,22 @@ fn render_open_article_panel(
         app.article_animation_phase(),
         app.hovered(),
     ));
-    lines.push(Line::default());
-    let controls = match (app.language(), app.focused_code_block()) {
-        (Language::En, Some(block)) if block.executable() => {
-            "j/k scroll · p run · c copy · Esc back"
-        }
-        (Language::Ru, Some(block)) if block.executable() => {
-            "о/л скролл · з запуск · с копировать · Esc назад"
-        }
-        (Language::En, Some(block)) if !block.animated() => "j/k scroll · c copy · Esc back",
-        (Language::Ru, Some(block)) if !block.animated() => "о/л скролл · с копировать · Esc назад",
-        (Language::En, _) => "j/k or arrows scroll · Esc back",
-        (Language::Ru, _) => "о/л или стрелки — скролл · Esc назад",
-    };
-    lines.push(Line::from(Span::styled(
-        format!(
-            "-- READ --  {}/{}  {controls}",
-            app.article_cursor() + 1,
-            app.article_total_rows().max(1)
-        ),
-        Style::new().fg(MUTED),
-    )));
+    if !app.keyboard_hints_hidden() {
+        lines.push(Line::default());
+        let controls = match app.focused_code_block() {
+            Some(block) if block.executable() => "j/k scroll · p run · c copy · Esc back",
+            Some(block) if !block.animated() => "j/k scroll · c copy · Esc back",
+            _ => "j/k or arrows scroll · Esc back",
+        };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "-- READ --  {}/{}  {controls}",
+                app.article_cursor() + 1,
+                app.article_total_rows().max(1)
+            ),
+            Style::new().fg(MUTED),
+        )));
+    }
 
     let body_top = header_top.saturating_add(1);
     frame.render_widget(
@@ -2216,15 +2196,11 @@ fn render_comments_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
         content_area,
     );
     for (action, action_area) in comment_action_areas(frame.area(), app) {
-        let (label, target) = match (action, app.language()) {
-            (CommentAction::Login, Language::En) => (" LOGIN ", HelpTarget::CommentLogin),
-            (CommentAction::Login, Language::Ru) => (" ВОЙТИ ", HelpTarget::CommentLogin),
-            (CommentAction::Register, Language::En) => (" REGISTER ", HelpTarget::CommentRegister),
-            (CommentAction::Register, Language::Ru) => (" РЕГИСТР. ", HelpTarget::CommentRegister),
-            (CommentAction::Add, Language::En) => (" COMMENT ", HelpTarget::CommentAdd),
-            (CommentAction::Add, Language::Ru) => (" НАПИСАТЬ ", HelpTarget::CommentAdd),
-            (CommentAction::Logout, Language::En) => (" LOGOUT ", HelpTarget::CommentLogout),
-            (CommentAction::Logout, Language::Ru) => (" ВЫЙТИ ", HelpTarget::CommentLogout),
+        let (label, target) = match action {
+            CommentAction::Login => (" LOGIN ", HelpTarget::CommentLogin),
+            CommentAction::Register => (" REGISTER ", HelpTarget::CommentRegister),
+            CommentAction::Add => (" COMMENT ", HelpTarget::CommentAdd),
+            CommentAction::Logout => (" LOGOUT ", HelpTarget::CommentLogout),
         };
         let hovered = app.hovered() == Some(target);
         frame.render_widget(
@@ -2304,6 +2280,10 @@ fn render_python_output_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     paint_horizontal_background(frame.buffer_mut(), area, PAPER, SOFT_GRAY);
+
+    if app.keyboard_hints_hidden() {
+        return;
+    }
 
     if app.awaiting_site_key() {
         frame.render_widget(
@@ -2590,6 +2570,34 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &App::default()))
             .expect("compact UI should render");
+    }
+
+    #[test]
+    fn mobile_mode_hides_keyboard_instructions_even_in_landscape() {
+        let area = Rect::new(0, 0, 84, 20);
+        let mut app = App::default();
+        app.set_keyboard_hints_hidden(true);
+        let _ = app.update(Message::SelectTab(Tab::Articles));
+        app.set_articles(vec![ArticleSummary {
+            slug: "one".into(),
+            title_en: "One".into(),
+            title_ru: "Один".into(),
+            date: "2026-09-08".into(),
+            published: true,
+            source_path: None,
+            edit_url: None,
+            labels: Vec::new(),
+        }]);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (area.top()..area.bottom())
+            .flat_map(|y| (area.left()..area.right()).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(!rendered.contains("j/k"));
+        assert!(!rendered.contains("Enter/o"));
+        assert!(!rendered.contains("LANG"));
     }
 
     #[test]
