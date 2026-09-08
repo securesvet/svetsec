@@ -268,6 +268,33 @@ Inside the container the key paths are fixed to
 `/run/svetsec/ssh_host_ed25519_key`, so host-specific absolute key paths are no
 longer needed in `.env`.
 
+### Telegram reader login
+
+Reader registration in the browser uses Telegram OpenID Connect, so new
+readers do not create or store a separate svetsec.ru password. Create or choose
+a bot in `@BotFather`, open **Login Widget**, and add this exact Allowed URL:
+
+```text
+https://svetsec.ru/api/auth/telegram/callback
+```
+
+Then copy the Client ID and Client Secret shown there into the persistent
+production file `/opt/svetsec/shared/.env`:
+
+```sh
+SVETSEC_TELEGRAM_CLIENT_ID='123456789'
+SVETSEC_TELEGRAM_CLIENT_SECRET='replace-with-the-client-secret'
+SVETSEC_TELEGRAM_REDIRECT_URL='https://svetsec.ru/api/auth/telegram/callback'
+```
+
+All three variables are required together. Restart the Compose application
+after editing the file. The callback validates Telegram's signed ID token,
+issuer, audience, expiration, nonce, one-time state, and PKCE verifier. Existing
+password-backed reader accounts remain usable for compatibility with SSH, but
+the web UI creates new reader sessions through Telegram. A Telegram profile
+photo is used initially; a signed-in reader can replace it from the account
+menu, and the replacement is stored in the existing SQLite database.
+
 ## Local terminal
 
 ```sh

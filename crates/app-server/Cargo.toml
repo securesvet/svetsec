@@ -17,6 +17,7 @@ base64.workspace = true
 bytes.workspace = true
 dotenvy.workspace = true
 image.workspace = true
+openidconnect.workspace = true
 ratatui = { workspace = true, features = ["crossterm"] }
 reqwest.workspace = true
 rusqlite.workspace = true
@@ -31,3 +32,4 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+url.workspace = true

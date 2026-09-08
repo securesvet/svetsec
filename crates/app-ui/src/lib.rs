@@ -80,6 +80,7 @@ struct UiLayout {
     content: Rect,
     footer: Rect,
     logo: Rect,
+    account: Rect,
     tabs: [Rect; 4],
     status: Option<Rect>,
     compact: bool,
@@ -152,6 +153,11 @@ pub fn tab_areas(area: Rect) -> [(Tab, Rect); 4] {
         (Tab::Projects, tabs[2]),
         (Tab::Info, tabs[3]),
     ]
+}
+
+#[must_use]
+pub fn account_area(area: Rect) -> Rect {
+    layout(area).account
 }
 
 #[must_use]
@@ -743,6 +749,35 @@ pub fn comment_action_areas(area: Rect, app: &App) -> Vec<(CommentAction, Rect)>
 }
 
 #[must_use]
+pub fn comments_viewport_area(area: Rect, app: &App) -> Option<Rect> {
+    if app.selected() != Tab::Articles
+        || app.opened_article().is_none()
+        || app.python_running()
+        || app.python_output().is_some()
+    {
+        return None;
+    }
+    let content = layout(area).content;
+    if !shows_sidebar(content) {
+        return None;
+    }
+    let panel = Layout::horizontal([
+        Constraint::Percentage(68),
+        Constraint::Length(1),
+        Constraint::Percentage(32),
+    ])
+    .split(content)[2];
+    let top = panel.top().saturating_add(2);
+    let bottom = panel.bottom().saturating_sub(4);
+    Some(Rect::new(
+        panel.left().saturating_add(2),
+        top,
+        panel.width.saturating_sub(4),
+        bottom.saturating_sub(top),
+    ))
+}
+
+#[must_use]
 pub fn comment_action_at(area: Rect, column: u16, row: u16, app: &App) -> Option<CommentAction> {
     comment_action_areas(area, app)
         .into_iter()
@@ -889,12 +924,25 @@ fn render_header(frame: &mut Frame<'_>, layout: &UiLayout, app: &App) {
                 Style::new().fg(INK).add_modifier(Modifier::BOLD),
             ),
         ]))
-        .alignment(if layout.compact {
-            Alignment::Center
-        } else {
-            Alignment::Left
-        }),
+        .alignment(Alignment::Left),
         layout.logo,
+    );
+
+    let account = if app.authenticated() {
+        "@svetsec".to_owned()
+    } else if let Some(username) = app.username() {
+        format!("@{username}")
+    } else {
+        match app.language() {
+            Language::En => "LOGIN".to_owned(),
+            Language::Ru => "ВОЙТИ".to_owned(),
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(account)
+            .alignment(Alignment::Right)
+            .style(Style::new().fg(MUTED).bold()),
+        layout.account,
     );
 
     for (tab, tab_area) in Tab::ALL.into_iter().zip(layout.tabs) {
@@ -2118,13 +2166,7 @@ fn render_status_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_comments_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Block::new().style(Style::new().bg(PANEL_ALT)), area);
-    let content_bottom = area.bottom().saturating_sub(4);
-    let content_area = Rect::new(
-        area.left().saturating_add(2),
-        area.top().saturating_add(2),
-        area.width.saturating_sub(4),
-        content_bottom.saturating_sub(area.top().saturating_add(2)),
-    );
+    let content_area = comments_viewport_area(frame.area(), app).unwrap_or_default();
     let mut lines = Vec::new();
     if app.comments_loading() {
         lines.push(Line::from(Span::styled(
@@ -2196,22 +2238,6 @@ fn render_comments_panel(frame: &mut Frame<'_>, area: Rect, app: &App) {
             action_area,
         );
     }
-    let identity = if app.authenticated() {
-        "@svetsec"
-    } else {
-        app.username().unwrap_or("guest")
-    };
-    frame.render_widget(
-        Paragraph::new(identity)
-            .style(Style::new().fg(MUTED))
-            .alignment(Alignment::Right),
-        Rect::new(
-            area.left().saturating_add(2),
-            area.bottom().saturating_sub(2),
-            area.width.saturating_sub(4),
-            1,
-        ),
-    );
     frame.render_widget(
         Block::new()
             .borders(Borders::ALL)
@@ -2423,8 +2449,9 @@ fn layout(area: Rect) -> UiLayout {
     .split(area);
 
     let inner = vertical[0].inner(Margin::new(1, 1));
-    let (logo, tabs) = if compact {
+    let (logo, account, tabs) = if compact {
         let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
+        let brand = Layout::horizontal([Constraint::Length(15), Constraint::Min(0)]).split(rows[0]);
         let tab_columns = Layout::horizontal([
             Constraint::Ratio(1, 4),
             Constraint::Ratio(1, 4),
@@ -2433,7 +2460,8 @@ fn layout(area: Rect) -> UiLayout {
         ])
         .split(rows[1]);
         (
-            rows[0],
+            brand[0],
+            brand[1],
             [
                 tab_columns[0],
                 tab_columns[1],
@@ -2449,9 +2477,14 @@ fn layout(area: Rect) -> UiLayout {
             Constraint::Length(12),
             Constraint::Length(11),
             Constraint::Min(0),
+            Constraint::Length(28),
         ])
         .split(inner);
-        (columns[0], [columns[1], columns[2], columns[3], columns[4]])
+        (
+            columns[0],
+            columns[6],
+            [columns[1], columns[2], columns[3], columns[4]],
+        )
     };
 
     let status = shows_sidebar(vertical[1]).then(|| {
@@ -2468,6 +2501,7 @@ fn layout(area: Rect) -> UiLayout {
         content: vertical[1],
         footer: vertical[2],
         logo,
+        account,
         tabs,
         status,
         compact,
@@ -2532,12 +2566,12 @@ mod tests {
     };
 
     use super::{
-        CodeBlockAction, CommentAction, article_at, article_back_area, article_cursor_at,
-        article_viewport_rows, code_action_areas, code_action_at, comment_action_areas,
-        comment_action_at, help_target_at, label_color, layout, markdown_image_offsets,
-        markdown_lines, markdown_lines_with_focus, native_image_placements, project_areas,
-        project_at, python_output_area, python_output_close_area, render, resume_link_area,
-        single_line, tab_at,
+        CodeBlockAction, CommentAction, account_area, article_at, article_back_area,
+        article_cursor_at, article_viewport_rows, code_action_areas, code_action_at,
+        comment_action_areas, comment_action_at, comments_viewport_area, help_target_at,
+        label_color, layout, markdown_image_offsets, markdown_lines, markdown_lines_with_focus,
+        native_image_placements, project_areas, project_at, python_output_area,
+        python_output_close_area, render, resume_link_area, single_line, tab_at,
     };
 
     #[test]
@@ -3187,6 +3221,12 @@ mod tests {
         }]);
 
         let guest_actions = comment_action_areas(area, &app);
+        let comments = comments_viewport_area(area, &app).expect("native comments viewport");
+        assert!(comments.width > 0 && comments.height > 0);
+        assert!(comments.left() > area.width / 2);
+        let account = account_area(area);
+        assert_eq!(account.top(), 1);
+        assert!(account.left() > area.width / 2);
         assert_eq!(
             guest_actions
                 .iter()

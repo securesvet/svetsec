@@ -18,12 +18,37 @@ pub struct Database(Arc<Mutex<Connection>>);
 pub struct User {
     pub id: i64,
     pub username: String,
+    pub external_avatar_url: Option<String>,
+    pub avatar_revision: Option<i64>,
+}
+
+impl User {
+    #[must_use]
+    pub fn avatar_url(&self) -> Option<String> {
+        self.avatar_revision.map_or_else(
+            || self.external_avatar_url.clone(),
+            |revision| Some(format!("/api/users/{}/avatar?v={revision}", self.id)),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct UserCredentials {
     pub user: User,
     pub password_hash: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TelegramLoginAttempt {
+    pub code_verifier: String,
+    pub nonce: String,
+    pub next_path: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UserAvatar {
+    pub bytes: Vec<u8>,
+    pub content_type: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -127,7 +152,27 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions(expires_at);
             CREATE INDEX IF NOT EXISTS idx_comments_article_created
                 ON comments(article_slug, created_at DESC, id DESC);
+            CREATE TABLE IF NOT EXISTS telegram_login_attempts (
+                state_hash TEXT PRIMARY KEY,
+                code_verifier TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                next_path TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_telegram_login_attempts_expires
+                ON telegram_login_attempts(expires_at);
             ",
+        )?;
+        ensure_column(&connection, "users", "telegram_id", "TEXT")?;
+        ensure_column(&connection, "users", "external_avatar_url", "TEXT")?;
+        ensure_column(&connection, "users", "avatar_bytes", "BLOB")?;
+        ensure_column(&connection, "users", "avatar_content_type", "TEXT")?;
+        ensure_column(&connection, "users", "avatar_revision", "INTEGER")?;
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id
+             ON users(telegram_id) WHERE telegram_id IS NOT NULL",
+            [],
         )?;
         Ok(Self(Arc::new(Mutex::new(connection))))
     }
@@ -185,19 +230,24 @@ impl Database {
         Ok(User {
             id: connection.last_insert_rowid(),
             username: username.to_owned(),
+            external_avatar_url: None,
+            avatar_revision: None,
         })
     }
 
     pub fn user_credentials(&self, username: &str) -> rusqlite::Result<Option<UserCredentials>> {
         self.connection()
             .query_row(
-                "SELECT id, username, password_hash FROM users WHERE username = ?1 COLLATE NOCASE",
+                "SELECT id, username, password_hash, external_avatar_url, avatar_revision
+                 FROM users WHERE username = ?1 COLLATE NOCASE",
                 [username],
                 |row| {
                     Ok(UserCredentials {
                         user: User {
                             id: row.get(0)?,
                             username: row.get(1)?,
+                            external_avatar_url: row.get(3)?,
+                            avatar_revision: row.get(4)?,
                         },
                         password_hash: row.get(2)?,
                     })
@@ -235,7 +285,8 @@ impl Database {
         }
         connection
             .query_row(
-                "SELECT users.id, users.username
+                "SELECT users.id, users.username, users.external_avatar_url,
+                        users.avatar_revision
                  FROM user_sessions
                  JOIN users ON users.id = user_sessions.user_id
                  WHERE user_sessions.token_hash = ?1 AND user_sessions.expires_at > ?2",
@@ -244,6 +295,8 @@ impl Database {
                     Ok(User {
                         id: row.get(0)?,
                         username: row.get(1)?,
+                        external_avatar_url: row.get(2)?,
+                        avatar_revision: row.get(3)?,
                     })
                 },
             )
@@ -256,6 +309,151 @@ impl Database {
             [hash_token(token)],
         )?;
         Ok(())
+    }
+
+    pub fn upsert_telegram_user(
+        &self,
+        telegram_id: &str,
+        preferred_username: Option<&str>,
+        external_avatar_url: Option<&str>,
+    ) -> rusqlite::Result<User> {
+        let mut connection = self.connection();
+        let transaction = connection.transaction()?;
+        let existing = transaction
+            .query_row(
+                "SELECT id, username, external_avatar_url, avatar_revision
+                 FROM users WHERE telegram_id = ?1",
+                [telegram_id],
+                user_from_row,
+            )
+            .optional()?;
+        let user = if let Some(user) = existing {
+            transaction.execute(
+                "UPDATE users SET external_avatar_url = ?1 WHERE id = ?2",
+                params![external_avatar_url, user.id],
+            )?;
+            User {
+                external_avatar_url: external_avatar_url.map(str::to_owned),
+                ..user
+            }
+        } else {
+            let username =
+                available_telegram_username(&transaction, telegram_id, preferred_username)?;
+            transaction.execute(
+                "INSERT INTO users(
+                    username, password_hash, telegram_id, external_avatar_url, created_at
+                 ) VALUES (?1, '', ?2, ?3, ?4)",
+                params![username, telegram_id, external_avatar_url, now()],
+            )?;
+            User {
+                id: transaction.last_insert_rowid(),
+                username,
+                external_avatar_url: external_avatar_url.map(str::to_owned),
+                avatar_revision: None,
+            }
+        };
+        transaction.commit()?;
+        Ok(user)
+    }
+
+    pub fn set_user_avatar(
+        &self,
+        user_id: i64,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> rusqlite::Result<User> {
+        let connection = self.connection();
+        let changed = connection.execute(
+            "UPDATE users
+             SET avatar_bytes = ?1, avatar_content_type = ?2,
+                 avatar_revision = COALESCE(avatar_revision, 0) + 1
+             WHERE id = ?3",
+            params![bytes, content_type, user_id],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        connection.query_row(
+            "SELECT id, username, external_avatar_url, avatar_revision
+             FROM users WHERE id = ?1",
+            [user_id],
+            user_from_row,
+        )
+    }
+
+    pub fn user_avatar(&self, user_id: i64) -> rusqlite::Result<Option<UserAvatar>> {
+        self.connection()
+            .query_row(
+                "SELECT avatar_bytes, avatar_content_type
+                 FROM users WHERE id = ?1 AND avatar_bytes IS NOT NULL",
+                [user_id],
+                |row| {
+                    Ok(UserAvatar {
+                        bytes: row.get(0)?,
+                        content_type: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn create_telegram_login_attempt(
+        &self,
+        state: &str,
+        code_verifier: &str,
+        nonce: &str,
+        next_path: &str,
+    ) -> rusqlite::Result<()> {
+        let timestamp = now();
+        let connection = self.connection();
+        connection.execute(
+            "DELETE FROM telegram_login_attempts WHERE expires_at <= ?1",
+            [timestamp],
+        )?;
+        connection.execute(
+            "INSERT INTO telegram_login_attempts(
+                state_hash, code_verifier, nonce, next_path, created_at, expires_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                hash_token(state),
+                code_verifier,
+                nonce,
+                next_path,
+                timestamp,
+                timestamp + 600
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn consume_telegram_login_attempt(
+        &self,
+        state: &str,
+    ) -> rusqlite::Result<Option<TelegramLoginAttempt>> {
+        let mut connection = self.connection();
+        let transaction = connection.transaction()?;
+        let state_hash = hash_token(state);
+        let attempt = transaction
+            .query_row(
+                "SELECT code_verifier, nonce, next_path
+                 FROM telegram_login_attempts
+                 WHERE state_hash = ?1 AND expires_at > ?2",
+                params![state_hash, now()],
+                |row| {
+                    Ok(TelegramLoginAttempt {
+                        code_verifier: row.get(0)?,
+                        nonce: row.get(1)?,
+                        next_path: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        transaction.execute(
+            "DELETE FROM telegram_login_attempts WHERE state_hash = ?1",
+            [state_hash],
+        )?;
+        transaction.commit()?;
+        Ok(attempt)
     }
 
     pub fn list_comments(&self, article_slug: &str) -> rusqlite::Result<Vec<Comment>> {
@@ -404,6 +602,91 @@ impl Database {
     }
 }
 
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|existing| existing == column) {
+        connection.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
+    Ok(User {
+        id: row.get(0)?,
+        username: row.get(1)?,
+        external_avatar_url: row.get(2)?,
+        avatar_revision: row.get(3)?,
+    })
+}
+
+fn available_telegram_username(
+    connection: &Connection,
+    telegram_id: &str,
+    preferred_username: Option<&str>,
+) -> rusqlite::Result<String> {
+    let sanitized = preferred_username
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        .take(24)
+        .collect::<String>();
+    let fallback_suffix = telegram_id
+        .chars()
+        .filter(char::is_ascii_digit)
+        .rev()
+        .take(12)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    let base = if (3..=24).contains(&sanitized.len())
+        && !matches!(
+            sanitized.to_ascii_lowercase().as_str(),
+            "guest" | "owner" | "svetsec"
+        ) {
+        sanitized
+    } else {
+        format!("telegram_{fallback_suffix}")
+            .chars()
+            .take(24)
+            .collect()
+    };
+    for suffix in 0..10_000_u32 {
+        let suffix = (suffix > 0).then(|| format!("_{suffix}"));
+        let suffix_len = suffix.as_ref().map_or(0, String::len);
+        let mut candidate = base
+            .chars()
+            .take(24_usize.saturating_sub(suffix_len))
+            .collect::<String>();
+        if let Some(suffix) = suffix {
+            candidate.push_str(&suffix);
+        }
+        let exists = connection
+            .query_row(
+                "SELECT 1 FROM users WHERE username = ?1 COLLATE NOCASE",
+                [&candidate],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Ok(candidate);
+        }
+    }
+    Err(rusqlite::Error::InvalidQuery)
+}
+
 fn comment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Comment> {
     Ok(Comment {
         id: row.get(0)?,
@@ -428,7 +711,7 @@ fn hash_token(token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArticleInput, CommentAuthor, CreateCommentError, Database};
+    use super::{ArticleInput, CommentAuthor, CreateCommentError, Database, TelegramLoginAttempt};
 
     #[test]
     fn owner_sessions_users_comments_and_articles_share_one_database() {
@@ -478,5 +761,58 @@ mod tests {
             db.user_for_session("reader-secret", false).expect("lookup"),
             None
         );
+    }
+
+    #[test]
+    fn telegram_users_attempts_and_uploaded_avatars_are_persistent() {
+        let db = Database::open(":memory:").expect("database");
+        db.create_telegram_login_attempt("state", "verifier", "nonce", "/articles/hello")
+            .expect("create login attempt");
+        assert_eq!(
+            db.consume_telegram_login_attempt("state")
+                .expect("consume login attempt"),
+            Some(TelegramLoginAttempt {
+                code_verifier: "verifier".into(),
+                nonce: "nonce".into(),
+                next_path: "/articles/hello".into(),
+            })
+        );
+        assert_eq!(
+            db.consume_telegram_login_attempt("state")
+                .expect("attempt is one-time"),
+            None
+        );
+
+        let user = db
+            .upsert_telegram_user(
+                "123456789",
+                Some("telegram_reader"),
+                Some("https://example.com/avatar.jpg"),
+            )
+            .expect("Telegram user");
+        assert_eq!(user.username, "telegram_reader");
+        assert_eq!(
+            user.avatar_url().as_deref(),
+            Some("https://example.com/avatar.jpg")
+        );
+        let same_user = db
+            .upsert_telegram_user("123456789", Some("renamed"), None)
+            .expect("existing Telegram user");
+        assert_eq!(same_user.id, user.id);
+        assert_eq!(same_user.username, "telegram_reader");
+
+        let updated = db
+            .set_user_avatar(user.id, b"normalized-image", "image/jpeg")
+            .expect("uploaded avatar");
+        assert_eq!(
+            updated.avatar_url().as_deref(),
+            Some(format!("/api/users/{}/avatar?v=1", user.id).as_str())
+        );
+        let avatar = db
+            .user_avatar(user.id)
+            .expect("avatar query")
+            .expect("avatar");
+        assert_eq!(avatar.bytes, b"normalized-image");
+        assert_eq!(avatar.content_type, "image/jpeg");
     }
 }

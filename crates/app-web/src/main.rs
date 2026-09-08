@@ -158,6 +158,8 @@ struct DomSignature {
     python_output: bool,
     authenticated: bool,
     username: Option<String>,
+    avatar_url: Option<String>,
+    telegram_login_enabled: bool,
     comments_len: usize,
     comments_loading: bool,
     comments_error: bool,
@@ -264,6 +266,8 @@ impl DomSignature {
             python_output: app.python_output().is_some(),
             authenticated: app.authenticated(),
             username: app.username().map(str::to_owned),
+            avatar_url: app.avatar_url().map(str::to_owned),
+            telegram_login_enabled: app.telegram_login_enabled(),
             comments_len: app.comments().len(),
             comments_loading: app.comments_loading(),
             comments_error: app.comments_error().is_some(),
@@ -515,6 +519,8 @@ fn main() -> io::Result<()> {
                                 let _ = sync_browser_articles(area, &app);
                                 let _ = sync_browser_projects(area, &app);
                                 let _ = sync_browser_navigation_links(area, &app);
+                                let _ = sync_browser_account(area, &app);
+                                let _ = sync_browser_comments(area, &app);
                             }
                             let _ = sync_browser_code_actions(area, &app);
                             if !navigation_only_transition {
@@ -614,6 +620,10 @@ fn reset_browser_transition_dom(image_ids: &RefCell<Vec<String>>) -> Result<(), 
     }
     if let Some(layer) = document.get_element_by_id("article-media-layer") {
         layer.set_text_content(None);
+    }
+    if let Some(comments) = document.get_element_by_id("web-comments-panel") {
+        comments.set_attribute("hidden", "")?;
+        comments.set_text_content(None);
     }
     image_ids.borrow_mut().clear();
     if let Some(terminal) = document.get_element_by_id("terminal") {
@@ -841,6 +851,249 @@ fn sync_mobile_controls(app: &App) -> Result<(), JsValue> {
             link.remove_attribute("aria-current")?;
         }
     }
+    Ok(())
+}
+
+fn sync_browser_account(area: ratzilla::ratatui::layout::Rect, app: &App) -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let Some(account) = document.get_element_by_id("web-account") else {
+        return Ok(());
+    };
+    let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+        account.set_attribute("hidden", "")?;
+        return Ok(());
+    };
+    let account_area = svetsec_ui::account_area(area);
+    if account_area.is_empty() {
+        account.set_attribute("hidden", "")?;
+        return Ok(());
+    }
+    position_dom_area(&account, &grid, account_area)?;
+    account.remove_attribute("hidden")?;
+
+    let signed_in = app.signed_in();
+    if let Some(menu) = document.get_element_by_id("account-menu") {
+        menu.set_attribute("data-signed-in", if signed_in { "true" } else { "false" })?;
+        menu.set_attribute(
+            "data-owner",
+            if app.authenticated() { "true" } else { "false" },
+        )?;
+    }
+    if let Some(name) = document.get_element_by_id("account-name") {
+        let label = if app.authenticated() {
+            "@svetsec".to_owned()
+        } else if let Some(username) = app.username() {
+            format!("@{username}")
+        } else {
+            match app.language() {
+                svetsec_core::Language::En => "Login".into(),
+                svetsec_core::Language::Ru => "Войти".into(),
+            }
+        };
+        name.set_text_content(Some(&label));
+    }
+    if let Some(avatar) = document.get_element_by_id("account-avatar") {
+        if let Some(source) = app.avatar_url() {
+            avatar.set_attribute("src", source)?;
+            avatar.set_attribute(
+                "alt",
+                app.username().unwrap_or(if app.authenticated() {
+                    "svetsec"
+                } else {
+                    "user"
+                }),
+            )?;
+            avatar.remove_attribute("hidden")?;
+        } else {
+            avatar.set_attribute("hidden", "")?;
+            avatar.remove_attribute("src")?;
+        }
+    }
+
+    let login_url = telegram_login_url();
+    configure_telegram_link(
+        &document,
+        "account-telegram-login",
+        app.telegram_login_enabled(),
+        &login_url,
+    )?;
+    configure_telegram_link(
+        &document,
+        "telegram-login",
+        app.telegram_login_enabled(),
+        &login_url,
+    )?;
+
+    let (telegram, owner, avatar, logout) = match app.language() {
+        svetsec_core::Language::En => (
+            "Continue with Telegram",
+            "Owner sign in",
+            "Change avatar",
+            "Log out",
+        ),
+        svetsec_core::Language::Ru => (
+            "Продолжить с Telegram",
+            "Вход владельца",
+            "Сменить аватар",
+            "Выйти",
+        ),
+    };
+    for (id, text) in [
+        ("account-telegram-login", telegram),
+        ("account-owner-login", owner),
+        ("account-avatar-label", avatar),
+        ("account-logout", logout),
+    ] {
+        if let Some(element) = document.get_element_by_id(id) {
+            element.set_text_content(Some(text));
+        }
+    }
+    if let Some(help) = document.get_element_by_id("telegram-login-help") {
+        help.set_text_content(Some(match (app.telegram_login_enabled(), app.language()) {
+            (true, svetsec_core::Language::En) => "No separate site password is stored.",
+            (true, svetsec_core::Language::Ru) => "Отдельный пароль сайта не сохраняется.",
+            (false, svetsec_core::Language::En) => {
+                "Telegram login is waiting for server configuration."
+            }
+            (false, svetsec_core::Language::Ru) => "Вход через Telegram ожидает настройки сервера.",
+        }));
+    }
+    Ok(())
+}
+
+fn configure_telegram_link(
+    document: &web_sys::Document,
+    id: &str,
+    enabled: bool,
+    url: &str,
+) -> Result<(), JsValue> {
+    let Some(link) = document.get_element_by_id(id) else {
+        return Ok(());
+    };
+    link.set_attribute("aria-disabled", if enabled { "false" } else { "true" })?;
+    if enabled {
+        link.set_attribute("href", url)?;
+    } else {
+        link.remove_attribute("href")?;
+    }
+    Ok(())
+}
+
+fn telegram_login_url() -> String {
+    let path = web_sys::window()
+        .and_then(|window| window.location().pathname().ok())
+        .unwrap_or_else(|| "/".into());
+    let encoded = js_sys::encode_uri_component(&path)
+        .as_string()
+        .unwrap_or_else(|| "%2F".into());
+    format!("/api/auth/telegram/start?next={encoded}")
+}
+
+fn sync_browser_comments(area: ratzilla::ratatui::layout::Rect, app: &App) -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    let Some(panel) = document.get_element_by_id("web-comments-panel") else {
+        return Ok(());
+    };
+    let Some(viewport) = svetsec_ui::comments_viewport_area(area, app) else {
+        panel.set_attribute("hidden", "")?;
+        panel.set_text_content(None);
+        return Ok(());
+    };
+    let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+        panel.set_attribute("hidden", "")?;
+        return Ok(());
+    };
+    let scroll_top = panel.scroll_top();
+    position_dom_area(&panel, &grid, viewport)?;
+    panel.set_attribute(
+        "aria-label",
+        match app.language() {
+            svetsec_core::Language::En => "Comments",
+            svetsec_core::Language::Ru => "Комментарии",
+        },
+    )?;
+    panel.set_text_content(None);
+    if app.comments_loading() || app.comments_error().is_some() || app.comments().is_empty() {
+        let message = document.create_element("p")?;
+        let text = if app.comments_loading() {
+            match app.language() {
+                svetsec_core::Language::En => "Loading comments…",
+                svetsec_core::Language::Ru => "Загрузка комментариев…",
+            }
+        } else if let Some(error) = app.comments_error() {
+            error
+        } else {
+            match app.language() {
+                svetsec_core::Language::En => "No comments yet.",
+                svetsec_core::Language::Ru => "Комментариев пока нет.",
+            }
+        };
+        message.set_text_content(Some(text));
+        panel.append_child(&message)?;
+    } else {
+        for comment in app.comments() {
+            append_comment_entry(&document, &panel, comment)?;
+        }
+    }
+    panel.remove_attribute("hidden")?;
+    panel.set_scroll_top(scroll_top);
+    Ok(())
+}
+
+fn append_comment_entry(
+    document: &web_sys::Document,
+    parent: &web_sys::Element,
+    comment: &Comment,
+) -> Result<(), JsValue> {
+    let entry = document.create_element("article")?;
+    let author = document.create_element("strong")?;
+    let body = document.create_element("div")?;
+    entry.set_class_name("comment-entry");
+    author.set_text_content(Some(&format!("@{}", comment.author)));
+    body.set_text_content(Some(&comment.body));
+    entry.append_child(&author)?;
+    entry.append_child(&body)?;
+    parent.append_child(&entry)?;
+    Ok(())
+}
+
+fn position_dom_area(
+    element: &web_sys::Element,
+    grid: &web_sys::Element,
+    area: ratzilla::ratatui::layout::Rect,
+) -> Result<(), JsValue> {
+    let Some(first_row) = grid.query_selector("pre")? else {
+        return Ok(());
+    };
+    let Some(first_cell) = first_row.query_selector("span")? else {
+        return Ok(());
+    };
+    let row = first_row.get_bounding_client_rect();
+    let cell = first_cell.get_bounding_client_rect();
+    let Some(element) = element.dyn_ref::<web_sys::HtmlElement>() else {
+        return Ok(());
+    };
+    let style = element.style();
+    style.set_property(
+        "left",
+        &format!("{}px", row.left() + f64::from(area.x) * cell.width()),
+    )?;
+    style.set_property(
+        "top",
+        &format!("{}px", row.top() + f64::from(area.y) * row.height()),
+    )?;
+    style.set_property(
+        "width",
+        &format!("{}px", f64::from(area.width) * cell.width()),
+    )?;
+    style.set_property(
+        "height",
+        &format!("{}px", f64::from(area.height) * row.height()),
+    )?;
     Ok(())
 }
 
@@ -1280,6 +1533,7 @@ fn install_browser_events(
     let scroll_viewport = Rc::clone(&viewport);
     let scroll_image_ids = Rc::clone(&browser_image_ids);
     let scroll_generation = Rc::clone(&scroll_settle_generation);
+    let scroll_render_pending = Rc::new(Cell::new(false));
     let scroll_terminal = terminal.clone();
     let scroll = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
         if scroll_app.borrow().selected() != Tab::Articles
@@ -1304,13 +1558,41 @@ fn install_browser_events(
         let _ = apply_browser_article_scroll_offset(&grid, scroll_top, rendered_row, row_height);
         let _ = position_browser_images(&document, scroll_top);
 
-        let limit = scroll_app.borrow().article_scroll_limit();
-        let row = native_scroll_row(scroll_top, row_height, limit);
-        if scroll_app.borrow().article_scroll() != row {
-            let _ = clear_cell_class(&grid, ".web-native-image-cell");
-            let _ = scroll_app
-                .borrow_mut()
-                .update(Message::SetArticleScroll(row));
+        if !scroll_render_pending.replace(true) {
+            let render_pending = Rc::clone(&scroll_render_pending);
+            let render_app = Rc::clone(&scroll_app);
+            let render_terminal = scroll_terminal.clone();
+            spawn_local(async move {
+                // Keep the virtual Ratatui document close to native momentum scrolling
+                // without rebuilding its DOM for every raw browser scroll event.
+                TimeoutFuture::new(24).await;
+                render_pending.set(false);
+                if render_app.borrow().selected() != Tab::Articles
+                    || render_app.borrow().opened_article().is_none()
+                {
+                    return;
+                }
+                let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+                    return;
+                };
+                let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+                    return;
+                };
+                let Ok(Some(row_height)) = browser_terminal_row_height(&grid) else {
+                    return;
+                };
+                let row = native_scroll_row(
+                    f64::from(render_terminal.scroll_top().max(0)),
+                    row_height,
+                    render_app.borrow().article_scroll_limit(),
+                );
+                if render_app.borrow().article_scroll() != row {
+                    let _ = clear_cell_class(&grid, ".web-native-image-cell");
+                    let _ = render_app
+                        .borrow_mut()
+                        .update(Message::SetArticleScroll(row));
+                }
+            });
         }
 
         let generation = scroll_generation.get().wrapping_add(1);
@@ -1319,10 +1601,36 @@ fn install_browser_events(
         let settle_app = Rc::clone(&scroll_app);
         let settle_viewport = Rc::clone(&scroll_viewport);
         let settle_image_ids = Rc::clone(&scroll_image_ids);
+        let settle_terminal = scroll_terminal.clone();
         spawn_local(async move {
             TimeoutFuture::new(120).await;
             if settle_generation.get() != generation {
                 return;
+            }
+            if settle_app.borrow().selected() != Tab::Articles
+                || settle_app.borrow().opened_article().is_none()
+            {
+                return;
+            }
+            let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+                return;
+            };
+            let Some(grid) = document.get_element_by_id("terminal_ratzilla_grid") else {
+                return;
+            };
+            let Ok(Some(row_height)) = browser_terminal_row_height(&grid) else {
+                return;
+            };
+            let row = native_scroll_row(
+                f64::from(settle_terminal.scroll_top().max(0)),
+                row_height,
+                settle_app.borrow().article_scroll_limit(),
+            );
+            if settle_app.borrow().article_scroll() != row {
+                let _ = clear_cell_class(&grid, ".web-native-image-cell");
+                let _ = settle_app
+                    .borrow_mut()
+                    .update(Message::SetArticleScroll(row));
             }
             let app = settle_app.borrow();
             let _ = sync_browser_images(&app, settle_viewport.get(), &settle_image_ids);
@@ -1434,6 +1742,8 @@ fn install_browser_events(
             if event.key() == "Escape" {
                 hide_modal("auth-modal");
                 hide_modal("comment-modal");
+                hide_modal("image-viewer");
+                hide_account_menu();
             }
             return;
         }
@@ -1756,12 +2066,12 @@ fn activate_at(
         let _ = ratzilla::utils::open_url("/resume", true);
         return;
     }
-    let image_url = {
+    let image = {
         let app = app.borrow();
-        browser_image_url_at(area, column, row, &app)
+        browser_image_at(area, column, row, &app)
     };
-    if let Some(image_url) = image_url {
-        let _ = ratzilla::utils::open_url(&image_url, true);
+    if let Some((image_url, alt)) = image {
+        show_image_viewer(&image_url, &alt);
         return;
     }
     let project = {
@@ -1978,12 +2288,12 @@ fn sync_browser_images(
     Ok(())
 }
 
-fn browser_image_url_at(
+fn browser_image_at(
     area: ratzilla::ratatui::layout::Rect,
     column: u16,
     row: u16,
     app: &App,
-) -> Option<String> {
+) -> Option<(String, String)> {
     svetsec_ui::native_image_placements(area, app)
         .into_iter()
         .find(|placement| {
@@ -2000,7 +2310,34 @@ fn browser_image_url_at(
             );
             !visible_area.is_empty() && visible_area.contains((column, row).into())
         })
-        .map(|placement| browser_image_url(placement.source))
+        .map(|placement| {
+            (
+                browser_image_url(placement.source),
+                placement.alt.to_owned(),
+            )
+        })
+}
+
+fn show_image_viewer(source: &str, alt: &str) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(viewer) = document.get_element_by_id("image-viewer") else {
+        return;
+    };
+    if let Some(image) = document.get_element_by_id("image-viewer-image") {
+        let _ = image.set_attribute("src", source);
+        let _ = image.set_attribute("alt", alt);
+    }
+    if let Some(caption) = document.get_element_by_id("image-viewer-caption") {
+        caption.set_text_content(Some(alt));
+    }
+    let _ = viewer.remove_attribute("hidden");
+    if let Ok(Some(button)) = viewer.query_selector(".image-viewer-close")
+        && let Some(button) = button.dyn_ref::<web_sys::HtmlElement>()
+    {
+        let _ = button.focus();
+    }
 }
 
 fn browser_image_url(source: &str) -> String {
@@ -2132,18 +2469,119 @@ fn begin_login(app: Rc<RefCell<App>>) {
 struct SessionState {
     authenticated: bool,
     username: Option<String>,
+    avatar_url: Option<String>,
+    telegram_enabled: bool,
 }
 
 fn apply_session_state(app: &Rc<RefCell<App>>, state: SessionState) {
     let mut app = app.borrow_mut();
     let _ = app.update(Message::SetAuthenticated(state.authenticated));
     app.set_user(state.username);
+    app.set_avatar_url(state.avatar_url);
+    app.set_telegram_login_enabled(state.telegram_enabled);
 }
 
 fn install_account_events(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
     let document = web_sys::window()
         .and_then(|window| window.document())
         .ok_or_else(|| JsValue::from_str("document unavailable"))?;
+    if let (Some(trigger), Some(menu)) = (
+        document.get_element_by_id("account-trigger"),
+        document.get_element_by_id("account-menu"),
+    ) {
+        let trigger_for_click = trigger.clone();
+        let menu_for_click = menu.clone();
+        let toggle = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            event.prevent_default();
+            let opening = menu_for_click.has_attribute("hidden");
+            if opening {
+                let _ = menu_for_click.remove_attribute("hidden");
+            } else {
+                let _ = menu_for_click.set_attribute("hidden", "");
+            }
+            let _ = trigger_for_click
+                .set_attribute("aria-expanded", if opening { "true" } else { "false" });
+            set_modal_error("account-error", "");
+        });
+        trigger.add_event_listener_with_callback("click", toggle.as_ref().unchecked_ref())?;
+        toggle.forget();
+    }
+
+    if let Some(button) = document.get_element_by_id("account-owner-login") {
+        let owner_app = Rc::clone(&app);
+        let open = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            event.prevent_default();
+            hide_account_menu();
+            show_auth_modal(true, false, owner_app.borrow().language());
+        });
+        button.add_event_listener_with_callback("click", open.as_ref().unchecked_ref())?;
+        open.forget();
+    }
+
+    if let Some(button) = document.get_element_by_id("account-logout") {
+        let logout_app = Rc::clone(&app);
+        let sign_out = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            event.prevent_default();
+            hide_account_menu();
+            logout(Rc::clone(&logout_app));
+        });
+        button.add_event_listener_with_callback("click", sign_out.as_ref().unchecked_ref())?;
+        sign_out.forget();
+    }
+
+    if let Some(input) = document
+        .get_element_by_id("account-avatar-input")
+        .and_then(|input| input.dyn_into::<HtmlInputElement>().ok())
+    {
+        let upload_app = Rc::clone(&app);
+        let upload_input = input.clone();
+        let change = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+            let Some(file) = upload_input.files().and_then(|files| files.get(0)) else {
+                return;
+            };
+            set_modal_error("account-error", "Uploading…");
+            let app = Rc::clone(&upload_app);
+            spawn_local(async move {
+                match upload_avatar_file(file).await {
+                    Ok(state) => {
+                        apply_session_state(&app, state);
+                        set_modal_error("account-error", "Avatar updated.");
+                    }
+                    Err(error) => {
+                        set_modal_error("account-error", &js_error_message(&error));
+                    }
+                }
+            });
+        });
+        input.add_event_listener_with_callback("change", change.as_ref().unchecked_ref())?;
+        change.forget();
+    }
+
+    for id in ["account-telegram-login", "telegram-login"] {
+        let Some(link) = document.get_element_by_id(id) else {
+            continue;
+        };
+        let error_id = if id == "telegram-login" {
+            "auth-error"
+        } else {
+            "account-error"
+        };
+        let guard = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            if event
+                .current_target()
+                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                .is_some_and(|link| link.get_attribute("aria-disabled").as_deref() == Some("true"))
+            {
+                event.prevent_default();
+                set_modal_error(
+                    error_id,
+                    "Telegram login has not been configured on the server yet.",
+                );
+            }
+        });
+        link.add_event_listener_with_callback("click", guard.as_ref().unchecked_ref())?;
+        guard.forget();
+    }
     let auth_form = document
         .get_element_by_id("auth-form")
         .ok_or_else(|| JsValue::from_str("auth form unavailable"))?;
@@ -2294,6 +2732,19 @@ fn install_account_events(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
         button.add_event_listener_with_callback("click", close.as_ref().unchecked_ref())?;
         close.forget();
     }
+    if let Some(viewer) = document.get_element_by_id("image-viewer") {
+        let close = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            let clicked_backdrop = event
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                .is_some_and(|target| target.id() == "image-viewer");
+            if clicked_backdrop {
+                hide_modal("image-viewer");
+            }
+        });
+        viewer.add_event_listener_with_callback("click", close.as_ref().unchecked_ref())?;
+        close.forget();
+    }
     Ok(())
 }
 
@@ -2339,16 +2790,18 @@ fn show_auth_modal(owner: bool, register: bool, language: svetsec_core::Language
     }
     set_modal_error("auth-error", "");
     let _ = modal.remove_attribute("hidden");
-    let focus = if owner {
-        "auth-password"
-    } else {
-        "auth-username"
-    };
-    if let Some(input) = document
-        .get_element_by_id(focus)
-        .and_then(|input| input.dyn_into::<HtmlInputElement>().ok())
+    if owner {
+        if let Some(input) = document
+            .get_element_by_id("auth-password")
+            .and_then(|input| input.dyn_into::<HtmlInputElement>().ok())
+        {
+            let _ = input.focus();
+        }
+    } else if let Some(link) = document
+        .get_element_by_id("telegram-login")
+        .and_then(|link| link.dyn_into::<web_sys::HtmlElement>().ok())
     {
-        let _ = input.focus();
+        let _ = link.focus();
     }
 }
 
@@ -2360,6 +2813,11 @@ fn localize_account_modals(document: &web_sys::Document, language: svetsec_core:
             ("auth-login", "Sign in"),
             ("auth-register", "Register"),
             ("auth-cancel", "Cancel"),
+            ("telegram-login", "Continue with Telegram"),
+            (
+                "telegram-login-help",
+                "No separate site password is stored.",
+            ),
             (
                 "auth-requirements",
                 "Username: 3–24 Latin letters, numbers, _ or -. Password: 8–128 characters. guest, owner, and svetsec are reserved.",
@@ -2376,6 +2834,11 @@ fn localize_account_modals(document: &web_sys::Document, language: svetsec_core:
             ("auth-login", "Войти"),
             ("auth-register", "Регистрация"),
             ("auth-cancel", "Отмена"),
+            ("telegram-login", "Продолжить с Telegram"),
+            (
+                "telegram-login-help",
+                "Отдельный пароль сайта не сохраняется.",
+            ),
             (
                 "auth-requirements",
                 "Имя: 3–24 латинских символа (A–Z, 0–9, _ или -). Пароль: 8–128 символов. guest, owner и svetsec зарезервированы.",
@@ -2462,19 +2925,7 @@ fn populate_comment_modal(document: &web_sys::Document, app: &App) {
         return;
     }
     for comment in app.comments() {
-        let (Ok(entry), Ok(author), Ok(body)) = (
-            document.create_element("article"),
-            document.create_element("strong"),
-            document.create_element("div"),
-        ) else {
-            continue;
-        };
-        entry.set_class_name("comment-entry");
-        author.set_text_content(Some(&format!("@{}", comment.author)));
-        body.set_text_content(Some(&comment.body));
-        let _ = entry.append_child(&author);
-        let _ = entry.append_child(&body);
-        let _ = list.append_child(&entry);
+        let _ = append_comment_entry(document, &list, comment);
     }
 }
 
@@ -2486,6 +2937,8 @@ fn logout(app: Rc<RefCell<App>>) {
                 SessionState {
                     authenticated: false,
                     username: None,
+                    avatar_url: None,
+                    telegram_enabled: app.borrow().telegram_login_enabled(),
                 },
             );
             refresh_comment_modal(&app);
@@ -2497,12 +2950,26 @@ fn modal_open() -> bool {
     web_sys::window()
         .and_then(|window| window.document())
         .is_some_and(|document| {
-            ["auth-modal", "comment-modal"].into_iter().any(|id| {
-                document
-                    .get_element_by_id(id)
-                    .is_some_and(|modal| !modal.has_attribute("hidden"))
-            })
+            ["auth-modal", "comment-modal", "image-viewer"]
+                .into_iter()
+                .any(|id| {
+                    document
+                        .get_element_by_id(id)
+                        .is_some_and(|modal| !modal.has_attribute("hidden"))
+                })
         })
+}
+
+fn hide_account_menu() {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    if let Some(menu) = document.get_element_by_id("account-menu") {
+        let _ = menu.set_attribute("hidden", "");
+    }
+    if let Some(trigger) = document.get_element_by_id("account-trigger") {
+        let _ = trigger.set_attribute("aria-expanded", "false");
+    }
 }
 
 fn hide_modal(id: &str) {
@@ -2587,14 +3054,59 @@ async fn fetch_session(
     body: Option<String>,
 ) -> Result<SessionState, JsValue> {
     let json = request_json(method, url, body).await?;
-    let authenticated = js_sys::Reflect::get(&json, &JsValue::from_str("authenticated"))?
+    session_state_from_json(&json)
+}
+
+fn session_state_from_json(json: &JsValue) -> Result<SessionState, JsValue> {
+    let authenticated = js_sys::Reflect::get(json, &JsValue::from_str("authenticated"))?
         .as_bool()
         .unwrap_or(false);
-    let username = js_sys::Reflect::get(&json, &JsValue::from_str("username"))?.as_string();
+    let username = js_sys::Reflect::get(json, &JsValue::from_str("username"))?.as_string();
+    let avatar_url = js_sys::Reflect::get(json, &JsValue::from_str("avatar_url"))?.as_string();
+    let telegram_enabled = js_sys::Reflect::get(json, &JsValue::from_str("telegram_enabled"))?
+        .as_bool()
+        .unwrap_or(false);
     Ok(SessionState {
         authenticated,
         username,
+        avatar_url,
+        telegram_enabled,
     })
+}
+
+async fn upload_avatar_file(file: web_sys::File) -> Result<SessionState, JsValue> {
+    if file.size() <= 0.0 || file.size() > 3.0 * 1024.0 * 1024.0 {
+        return Err(JsValue::from_str(
+            "Choose a JPEG, PNG, or WebP image up to 3 MB.",
+        ));
+    }
+    let content_type = file.type_();
+    if !matches!(
+        content_type.as_str(),
+        "image/jpeg" | "image/png" | "image/webp"
+    ) {
+        return Err(JsValue::from_str("Choose a JPEG, PNG, or WebP image."));
+    }
+    let body = JsFuture::from(file.array_buffer()).await?;
+    let options = RequestInit::new();
+    options.set_method("POST");
+    options.set_credentials(RequestCredentials::SameOrigin);
+    options.set_body(&body);
+    let request = Request::new_with_str_and_init("/api/users/avatar", &options)?;
+    request.headers().set("Accept", "application/json")?;
+    request.headers().set("Content-Type", &content_type)?;
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("window unavailable"))?;
+    let response = JsFuture::from(window.fetch_with_request(&request))
+        .await?
+        .dyn_into::<Response>()?;
+    if !response.ok() {
+        return Err(JsValue::from_str(&format!(
+            "Avatar upload failed ({}).",
+            response.status()
+        )));
+    }
+    let json = JsFuture::from(response.json()?).await?;
+    session_state_from_json(&json)
 }
 
 fn load_articles(app: Rc<RefCell<App>>, force: bool) {
@@ -2939,7 +3451,7 @@ mod tests {
 
     use super::{
         DomSignature, RenderSignature, WebRoute, article_navigation_only_transition,
-        article_scroll_offset, browser_image_id, browser_image_url_at, browser_key_code,
+        article_scroll_offset, browser_image_at, browser_image_id, browser_key_code,
         cell_contains_selectable_text, grid_axis, grid_cell_axis, localized_account_error,
         native_scroll_row, rendered_scroll_top, selection_runs, structural_dom_transition,
         terminal_grid_size,
@@ -3034,10 +3546,13 @@ mod tests {
         let row = (placement.y + i32::from(placement.clip_top)).max(0) as u16;
 
         assert_eq!(
-            browser_image_url_at(area, column, row, &app).as_deref(),
-            Some("/api/github/assets/assets/screenshot.png")
+            browser_image_at(area, column, row, &app),
+            Some((
+                "/api/github/assets/assets/screenshot.png".into(),
+                "Screenshot".into()
+            ))
         );
-        assert_eq!(browser_image_url_at(area, 99, 39, &app), None);
+        assert_eq!(browser_image_at(area, 99, 39, &app), None);
     }
 
     #[test]
@@ -3089,6 +3604,12 @@ mod tests {
         assert!(html.contains("--article-scroll-offset"));
         assert!(html.contains("translate3d"));
         assert!(html.contains("overflow-anchor: none"));
+        assert!(html.contains("touch-action: pan-y pinch-zoom"));
+        assert!(html.contains("-webkit-overflow-scrolling: touch"));
+        assert!(html.contains("id=\"web-comments-panel\""));
+        assert!(html.contains("overscroll-behavior: contain"));
+        assert!(html.contains("id=\"image-viewer\""));
+        assert!(html.contains("id=\"web-account\""));
         assert_eq!(rendered_scroll_top(3, 19.5), 58.5);
         assert_eq!(native_scroll_row(58.4, 19.5, 20), 2);
         assert_eq!(native_scroll_row(58.5, 19.5, 20), 3);

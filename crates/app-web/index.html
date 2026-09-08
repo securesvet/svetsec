@@ -86,11 +86,17 @@
 
       #terminal[data-native-scroll="true"] {
         overflow-x: hidden;
-        overflow-y: auto;
+        overflow-y: scroll;
         overscroll-behavior-y: contain;
         scrollbar-color: #94989a #f5f6f4;
         scrollbar-width: thin;
-        touch-action: pan-y;
+        touch-action: pan-y pinch-zoom;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      #terminal[data-native-scroll="true"] #terminal_ratzilla_grid,
+      #terminal[data-native-scroll="true"] #terminal_ratzilla_grid > pre {
+        touch-action: pan-y pinch-zoom;
       }
 
       #terminal[data-native-scroll="true"] #terminal_ratzilla_grid {
@@ -149,6 +155,149 @@
         object-position: left top;
         background: #fff;
         image-rendering: auto;
+      }
+
+      #web-comments-panel {
+        position: fixed;
+        z-index: 12;
+        min-width: 0;
+        min-height: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        touch-action: pan-y;
+        -webkit-overflow-scrolling: touch;
+        padding-right: 6px;
+        color: #363a3d;
+        background: #f5f6f4;
+        font: 14px/1.45 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        scrollbar-color: #94989a #f5f6f4;
+        scrollbar-width: thin;
+      }
+
+      #web-comments-panel[hidden] {
+        display: none;
+      }
+
+      #web-comments-panel .comment-entry {
+        margin-bottom: 12px;
+      }
+
+      #web-account {
+        position: fixed;
+        z-index: 40;
+        min-width: 0;
+      }
+
+      #web-account[hidden],
+      #account-menu[hidden] {
+        display: none;
+      }
+
+      #account-trigger {
+        width: 100%;
+        height: 100%;
+        min-width: 0;
+        border: 0;
+        border-radius: 999px;
+        padding: 0 8px;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 7px;
+        color: #464a4e;
+        background: #f5f6f4;
+        font: 700 13px/1 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        cursor: pointer;
+        touch-action: manipulation;
+      }
+
+      #account-trigger:hover,
+      #account-trigger[aria-expanded="true"] {
+        color: #181a1c;
+        background: #e8e9e7;
+      }
+
+      #account-avatar {
+        width: 24px;
+        height: 24px;
+        flex: 0 0 24px;
+        border: 1px solid #94989a;
+        border-radius: 50%;
+        object-fit: cover;
+        background: #fff;
+      }
+
+      #account-avatar[hidden] {
+        display: none;
+      }
+
+      #account-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      #account-menu {
+        position: absolute;
+        top: calc(100% + 7px);
+        right: 0;
+        width: min(280px, calc(100vw - 20px));
+        border: 1px solid #94989a;
+        border-radius: 14px;
+        padding: 10px;
+        background: #fff;
+        box-shadow: 0 16px 44px rgb(24 26 28 / 20%);
+      }
+
+      .account-action {
+        width: 100%;
+        min-height: 42px;
+        border: 0;
+        border-radius: 10px;
+        padding: 0 12px;
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        color: #181a1c;
+        background: #f5f6f4;
+        font: 700 13px/1.25 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      .account-action + .account-action {
+        margin-top: 7px;
+      }
+
+      .account-action:hover {
+        background: #e8e9e7;
+      }
+
+      #account-telegram-login {
+        color: #fff;
+        background: #315d82;
+      }
+
+      #account-telegram-login[aria-disabled="true"] {
+        color: #696d70;
+        background: #e8e9e7;
+        cursor: not-allowed;
+      }
+
+      #account-avatar-input {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      #account-menu[data-signed-in="false"] .signed-in-only,
+      #account-menu[data-signed-in="true"] .signed-out-only,
+      #account-menu[data-owner="true"] .reader-account-only {
+        display: none;
       }
 
       #terminal_ratzilla_grid > pre span.web-native-image-cell {
@@ -344,6 +493,60 @@
         display: none;
       }
 
+      .image-viewer {
+        position: fixed;
+        inset: 0;
+        z-index: 120;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        gap: 12px;
+        padding:
+          max(14px, env(safe-area-inset-top))
+          max(14px, env(safe-area-inset-right))
+          max(14px, env(safe-area-inset-bottom))
+          max(14px, env(safe-area-inset-left));
+        color: #fff;
+        background: rgb(12 14 17 / 96%);
+        overscroll-behavior: contain;
+      }
+
+      .image-viewer[hidden] {
+        display: none;
+      }
+
+      .image-viewer-close {
+        justify-self: end;
+        min-width: 44px;
+        min-height: 44px;
+        border: 1px solid rgb(255 255 255 / 38%);
+        border-radius: 999px;
+        color: #fff;
+        background: rgb(255 255 255 / 12%);
+        font: 700 22px/1 sans-serif;
+        cursor: pointer;
+      }
+
+      .image-viewer-close:hover {
+        background: rgb(255 255 255 / 24%);
+      }
+
+      #image-viewer-image {
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        object-fit: contain;
+        object-position: center;
+      }
+
+      #image-viewer-caption {
+        margin: 0;
+        overflow: hidden;
+        color: #e8e9e7;
+        text-align: center;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .modal-card {
         width: min(420px, 100%);
         border: 1px solid #94989a;
@@ -443,6 +646,9 @@
         gap: 10px;
         max-height: min(34vh, 260px);
         overflow-y: auto;
+        overscroll-behavior: contain;
+        touch-action: pan-y;
+        -webkit-overflow-scrolling: touch;
         padding-right: 4px;
       }
 
@@ -471,6 +677,28 @@
         display: none;
       }
 
+      #auth-modal[data-mode="reader"] .password-auth {
+        display: none;
+      }
+
+      .telegram-login {
+        min-height: 46px;
+        border-radius: 999px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #fff;
+        background: #315d82;
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      .telegram-login[aria-disabled="true"] {
+        color: #696d70;
+        background: #e8e9e7;
+        cursor: not-allowed;
+      }
+
       .web-back-link,
       .web-resume-link {
         color: #1c649f !important;
@@ -491,7 +719,12 @@
       @media (max-width: 700px), (pointer: coarse) {
         #terminal {
           bottom: calc(64px + env(safe-area-inset-bottom, 0px));
-          touch-action: none;
+          touch-action: manipulation;
+        }
+
+        #terminal[data-native-scroll="true"] {
+          overflow-y: scroll;
+          touch-action: pan-y pinch-zoom;
         }
 
         body[data-mobile-article-open="true"] #terminal {
@@ -582,6 +815,9 @@
           overflow-y: auto;
           border-radius: 18px 18px 12px 12px;
           padding: 18px;
+          overscroll-behavior: contain;
+          touch-action: pan-y;
+          -webkit-overflow-scrolling: touch;
         }
 
         .modal-card input,
@@ -637,6 +873,27 @@
   <body data-mobile-article-open="false">
     <div id="terminal"></div>
     <div id="article-media-layer" aria-live="polite"></div>
+    <section id="web-comments-panel" aria-label="Comments" hidden></section>
+    <div id="web-account" hidden>
+      <button id="account-trigger" type="button" aria-expanded="false" aria-controls="account-menu">
+        <img id="account-avatar" alt="" hidden />
+        <span id="account-name">Login</span>
+      </button>
+      <div id="account-menu" data-signed-in="false" data-owner="false" hidden>
+        <a id="account-telegram-login" class="account-action signed-out-only" href="/api/auth/telegram/start">
+          Continue with Telegram
+        </a>
+        <button id="account-owner-login" class="account-action signed-out-only" type="button">
+          Owner sign in
+        </button>
+        <label id="account-avatar-label" class="account-action signed-in-only reader-account-only" for="account-avatar-input">
+          Change avatar
+        </label>
+        <input id="account-avatar-input" type="file" accept="image/jpeg,image/png,image/webp" />
+        <button id="account-logout" class="account-action signed-in-only" type="button">Log out</button>
+        <p id="account-error" class="modal-error" role="alert"></p>
+      </div>
+    </div>
     <div id="mobile-controls">
       <div class="mobile-article-actions" aria-label="Article controls">
         <button type="button" data-article-action="back">← Articles</button>
@@ -654,7 +911,11 @@
     <div id="auth-modal" class="modal-overlay" data-mode="reader" hidden>
       <form id="auth-form" class="modal-card" data-action="login">
         <h2 id="auth-title">Reader account</h2>
-        <label id="auth-username-row" class="reader-only">
+        <div class="reader-only">
+          <a id="telegram-login" class="telegram-login" href="/api/auth/telegram/start">Continue with Telegram</a>
+          <p id="telegram-login-help" class="form-help">No separate site password is stored.</p>
+        </div>
+        <label id="auth-username-row" class="reader-only password-auth">
           <span id="auth-username-label">Username</span>
           <input
             id="auth-username"
@@ -667,7 +928,7 @@
             pattern="[A-Za-z0-9_-]{3,24}"
           />
         </label>
-        <label>
+        <label class="password-auth">
           <span id="auth-password-label">Password</span>
           <input
             id="auth-password"
@@ -679,16 +940,21 @@
             required
           />
         </label>
-        <p id="auth-requirements" class="form-help reader-only">
+        <p id="auth-requirements" class="form-help reader-only password-auth">
           Username: 3–24 Latin letters, numbers, _ or -. Password: 8–128 characters.
         </p>
         <div class="modal-actions">
-          <button id="auth-login" type="submit" data-auth-action="login">Sign in</button>
-          <button id="auth-register" type="submit" class="reader-only" data-auth-action="register">Register</button>
+          <button id="auth-login" class="password-auth" type="submit" data-auth-action="login">Sign in</button>
+          <button id="auth-register" type="submit" class="reader-only password-auth" data-auth-action="register">Register</button>
           <button id="auth-cancel" type="button" data-modal-close="auth-modal">Cancel</button>
         </div>
         <p id="auth-error" class="modal-error" role="alert"></p>
       </form>
+    </div>
+    <div id="image-viewer" class="image-viewer" role="dialog" aria-modal="true" aria-label="Image viewer" hidden>
+      <button class="image-viewer-close" type="button" data-modal-close="image-viewer" aria-label="Close image">×</button>
+      <img id="image-viewer-image" alt="" />
+      <p id="image-viewer-caption"></p>
     </div>
     <div id="comment-modal" class="modal-overlay" hidden>
       <form id="comment-form" class="modal-card">

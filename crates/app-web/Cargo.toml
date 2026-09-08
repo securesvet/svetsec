@@ -21,12 +21,15 @@ wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 web-sys = { workspace = true, features = [
     "Clipboard",
+    "Blob",
     "Document",
     "DomRect",
     "CssStyleDeclaration",
     "Element",
     "Event",
     "EventTarget",
+    "File",
+    "FileList",
     "Headers",
     "History",
     "HtmlElement",

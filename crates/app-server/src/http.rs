@@ -1,11 +1,12 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{io::Cursor, net::SocketAddr, sync::Arc};
 
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -20,9 +21,12 @@ use crate::db::{
 };
 use crate::github::{GithubArticle, GithubArticleBody, GithubSource};
 use crate::python::PyodideRunner;
+use crate::telegram::{TelegramAuth, pkce_challenge};
 use svetsec_core::{Language, markdown_code_blocks};
 
 const COOKIE_NAME: &str = "svetsec_session";
+const TELEGRAM_STATE_COOKIE: &str = "svetsec_telegram_state";
+const MAX_AVATAR_BYTES: usize = 3 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct HttpState {
@@ -31,12 +35,15 @@ pub struct HttpState {
     secure_cookie: bool,
     github: GithubSource,
     pyodide: PyodideRunner,
+    telegram: Option<TelegramAuth>,
 }
 
 #[derive(Serialize)]
 struct SessionState {
     authenticated: bool,
     username: Option<String>,
+    avatar_url: Option<String>,
+    telegram_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +89,18 @@ struct LanguageQuery {
     lang: Option<String>,
 }
 
+#[derive(Default, Deserialize)]
+struct TelegramStartQuery {
+    next: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct TelegramCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
 impl LanguageQuery {
     fn language(&self) -> Language {
         self.lang
@@ -110,6 +129,7 @@ impl HttpState {
         secure_cookie: bool,
         github: GithubSource,
         pyodide: PyodideRunner,
+        telegram: Option<TelegramAuth>,
     ) -> Self {
         Self {
             db,
@@ -117,6 +137,7 @@ impl HttpState {
             secure_cookie,
             github,
             pyodide,
+            telegram,
         }
     }
 }
@@ -137,6 +158,10 @@ pub async fn serve(
         .route("/api/session", get(session).post(login).delete(logout))
         .route("/api/users", post(register))
         .route("/api/users/session", post(user_login))
+        .route("/api/users/avatar", post(upload_avatar))
+        .route("/api/users/{user_id}/avatar", get(user_avatar))
+        .route("/api/auth/telegram/start", get(telegram_start))
+        .route("/api/auth/telegram/callback", get(telegram_callback))
         .route("/api/articles", get(articles).post(save_article))
         .route(
             "/api/articles/{slug}/comments",
@@ -151,6 +176,7 @@ pub async fn serve(
         .route("/api/github/assets/{*path}", get(github_asset))
         .route_service("/resume", ServeFile::new(resume))
         .fallback_service(static_files)
+        .layer(DefaultBodyLimit::max(MAX_AVATAR_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -187,6 +213,8 @@ async fn login(
         SessionState {
             authenticated: true,
             username: None,
+            avatar_url: Some("/assets/profile.jpg".into()),
+            telegram_enabled: state.telegram.is_some(),
         },
         &token,
         state.secure_cookie,
@@ -209,10 +237,13 @@ async fn register(
         .db
         .create_user_session(&token, user.id)
         .map_err(internal)?;
+    let avatar_url = user.avatar_url();
     session_with_cookie(
         SessionState {
             authenticated: false,
             username: Some(user.username),
+            avatar_url,
+            telegram_enabled: state.telegram.is_some(),
         },
         &token,
         state.secure_cookie,
@@ -236,10 +267,13 @@ async fn user_login(
         .db
         .create_user_session(&token, credentials.user.id)
         .map_err(internal)?;
+    let avatar_url = credentials.user.avatar_url();
     session_with_cookie(
         SessionState {
             authenticated: false,
             username: Some(credentials.user.username),
+            avatar_url,
+            telegram_enabled: state.telegram.is_some(),
         },
         &token,
         state.secure_cookie,
@@ -259,6 +293,163 @@ async fn logout(State(state): State<HttpState>, headers: HeaderMap) -> Result<Re
             .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid session cookie"))?,
     );
     Ok(response)
+}
+
+async fn telegram_start(
+    State(state): State<HttpState>,
+    Query(query): Query<TelegramStartQuery>,
+) -> Result<Response, ApiError> {
+    let telegram = state.telegram.as_ref().ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        "Telegram login is not configured",
+    ))?;
+    let oauth_state = new_session_token();
+    let nonce = new_session_token();
+    let verifier = new_session_token();
+    let next_path = safe_next_path(query.next.as_deref());
+    state
+        .db
+        .create_telegram_login_attempt(&oauth_state, &verifier, &nonce, &next_path)
+        .map_err(internal)?;
+    let location = telegram.authorization_url(&oauth_state, &nonce, &pkce_challenge(&verifier));
+    let mut response = Redirect::temporary(&location).into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&telegram_state_cookie(
+            &oauth_state,
+            state.secure_cookie,
+            600,
+        ))
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid login cookie"))?,
+    );
+    Ok(response)
+}
+
+async fn telegram_callback(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(query): Query<TelegramCallbackQuery>,
+) -> Result<Response, ApiError> {
+    if query.error.is_some() {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Telegram login was cancelled",
+        ));
+    }
+    let returned_state = query
+        .state
+        .as_deref()
+        .ok_or(ApiError(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
+    let cookie_state = cookie_from(&headers, TELEGRAM_STATE_COOKIE).ok_or(ApiError(
+        StatusCode::BAD_REQUEST,
+        "missing OAuth state cookie",
+    ))?;
+    if cookie_state != returned_state {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid OAuth state"));
+    }
+    let code = query.code.ok_or(ApiError(
+        StatusCode::BAD_REQUEST,
+        "missing authorization code",
+    ))?;
+    let attempt = state
+        .db
+        .consume_telegram_login_attempt(returned_state)
+        .map_err(internal)?
+        .ok_or(ApiError(StatusCode::BAD_REQUEST, "expired OAuth state"))?;
+    let telegram = state.telegram.as_ref().ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        "Telegram login is not configured",
+    ))?;
+    let profile = telegram
+        .exchange(code, attempt.code_verifier, attempt.nonce)
+        .await
+        .map_err(telegram_error)?;
+    let user = state
+        .db
+        .upsert_telegram_user(
+            &profile.id,
+            profile.username.as_deref(),
+            profile.picture.as_deref(),
+        )
+        .map_err(registration_error)?;
+    let token = new_session_token();
+    state
+        .db
+        .create_user_session(&token, user.id)
+        .map_err(internal)?;
+    let mut response = Redirect::to(&attempt.next_path).into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie(&token, state.secure_cookie))
+            .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid session cookie"))?,
+    );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&telegram_state_cookie("", state.secure_cookie, 0))
+            .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid login cookie"))?,
+    );
+    Ok(response)
+}
+
+async fn upload_avatar(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<SessionState>, ApiError> {
+    let identity = identity(&state, token_from(&headers).as_deref(), true)?;
+    let user = identity.user.ok_or(ApiError(
+        StatusCode::UNAUTHORIZED,
+        "reader session required",
+    ))?;
+    if body.is_empty() || body.len() > MAX_AVATAR_BYTES {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "avatar is too large",
+        ));
+    }
+    let encoded = tokio::task::spawn_blocking(move || normalize_avatar(&body))
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "avatar processing failed",
+            )
+        })??;
+    let user = state
+        .db
+        .set_user_avatar(user.id, &encoded, "image/jpeg")
+        .map_err(internal)?;
+    let avatar_url = user.avatar_url();
+    Ok(Json(SessionState {
+        authenticated: false,
+        username: Some(user.username),
+        avatar_url,
+        telegram_enabled: state.telegram.is_some(),
+    }))
+}
+
+async fn user_avatar(
+    State(state): State<HttpState>,
+    Path(user_id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let avatar = state
+        .db
+        .user_avatar(user_id)
+        .map_err(internal)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "avatar not found"))?;
+    let content_type = HeaderValue::from_str(&avatar.content_type)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid avatar type"))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
+            ),
+        ],
+        avatar.bytes,
+    )
+        .into_response())
 }
 
 async fn articles(
@@ -406,7 +597,13 @@ fn state_response(
     let identity = identity(state, token, touch)?;
     Ok(Json(SessionState {
         authenticated: identity.owner,
-        username: identity.user.map(|user| user.username),
+        username: identity.user.as_ref().map(|user| user.username.clone()),
+        avatar_url: if identity.owner {
+            Some("/assets/profile.jpg".into())
+        } else {
+            identity.user.and_then(|user| user.avatar_url())
+        },
+        telegram_enabled: state.telegram.is_some(),
     }))
 }
 
@@ -437,17 +634,82 @@ fn identity(state: &HttpState, token: Option<&str>, touch: bool) -> Result<Ident
 }
 
 fn token_from(headers: &HeaderMap) -> Option<String> {
+    cookie_from(headers, COOKIE_NAME)
+}
+
+fn cookie_from(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(header::COOKIE)?
         .to_str()
         .ok()?
         .split(';')
         .map(str::trim)
-        .find_map(|cookie| {
-            cookie
-                .strip_prefix(&format!("{COOKIE_NAME}="))
-                .map(str::to_owned)
+        .find_map(|cookie| cookie.strip_prefix(&format!("{name}=")).map(str::to_owned))
+}
+
+fn telegram_state_cookie(state: &str, secure: bool, max_age: u16) -> String {
+    format!(
+        "{TELEGRAM_STATE_COOKIE}={state}; Path=/api/auth/telegram/callback; HttpOnly; SameSite=Lax; Max-Age={max_age}{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+fn safe_next_path(path: Option<&str>) -> String {
+    path.filter(|path| {
+        path.starts_with('/')
+            && !path.starts_with("//")
+            && path.len() <= 200
+            && !path.chars().any(char::is_control)
+    })
+    .unwrap_or("/")
+    .to_owned()
+}
+
+fn normalize_avatar(bytes: &[u8]) -> Result<Vec<u8>, ApiError> {
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| ApiError(StatusCode::UNSUPPORTED_MEDIA_TYPE, "invalid avatar image"))?;
+    let format = reader
+        .format()
+        .filter(|format| {
+            matches!(
+                format,
+                image::ImageFormat::Jpeg | image::ImageFormat::Png | image::ImageFormat::WebP
+            )
         })
+        .ok_or(ApiError(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported avatar image",
+        ))?;
+    let (width, height) = image::ImageReader::with_format(Cursor::new(bytes), format)
+        .into_dimensions()
+        .map_err(|_| ApiError(StatusCode::UNSUPPORTED_MEDIA_TYPE, "invalid avatar image"))?;
+    if width > 4096 || height > 4096 {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "avatar dimensions are too large",
+        ));
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
+    reader.limits(limits);
+    let image = reader
+        .decode()
+        .map_err(|_| ApiError(StatusCode::UNSUPPORTED_MEDIA_TYPE, "invalid avatar image"))?;
+    let thumbnail = if width > 512 || height > 512 {
+        image.thumbnail(512, 512)
+    } else {
+        image
+    }
+    .to_rgb8();
+    let mut output = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(thumbnail)
+        .write_to(&mut output, image::ImageFormat::Jpeg)
+        .map_err(|_| ApiError(StatusCode::UNSUPPORTED_MEDIA_TYPE, "invalid avatar image"))?;
+    Ok(output.into_inner())
 }
 
 fn session_cookie(token: &str, secure: bool) -> String {
@@ -619,6 +881,11 @@ fn python_error(error: anyhow::Error) -> ApiError {
     )
 }
 
+fn telegram_error(error: anyhow::Error) -> ApiError {
+    tracing::warn!(%error, "Telegram login failed");
+    ApiError(StatusCode::BAD_GATEWAY, "Telegram login failed")
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
@@ -628,8 +895,8 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        UserLogin, hash_password, session_cookie, validate_comment, validate_user,
-        verify_user_password,
+        UserLogin, hash_password, normalize_avatar, safe_next_path, session_cookie,
+        telegram_state_cookie, validate_comment, validate_user, verify_user_password,
     };
 
     #[test]
@@ -691,5 +958,36 @@ mod tests {
         assert!(cookie.contains("SameSite=Strict"));
         assert!(cookie.contains("Secure"));
         assert!(!cookie.contains("Domain="));
+
+        let state_cookie = telegram_state_cookie("state", true, 600);
+        assert!(state_cookie.contains("HttpOnly"));
+        assert!(state_cookie.contains("SameSite=Lax"));
+        assert!(state_cookie.contains("Path=/api/auth/telegram/callback"));
+    }
+
+    #[test]
+    fn telegram_return_paths_cannot_leave_this_site() {
+        assert_eq!(safe_next_path(Some("/articles/hello")), "/articles/hello");
+        assert_eq!(safe_next_path(Some("//evil.example")), "/");
+        assert_eq!(safe_next_path(Some("https://evil.example")), "/");
+        assert_eq!(safe_next_path(Some("/bad\nheader")), "/");
+    }
+
+    #[test]
+    fn uploaded_avatars_are_normalized_and_dimension_limited() {
+        let mut source = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(32, 16)
+            .write_to(&mut source, image::ImageFormat::Png)
+            .expect("source PNG");
+        let normalized = normalize_avatar(source.get_ref()).expect("normalized avatar");
+        let avatar = image::load_from_memory(&normalized).expect("normalized JPEG");
+        assert_eq!((avatar.width(), avatar.height()), (32, 16));
+
+        let mut oversized = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(4097, 1)
+            .write_to(&mut oversized, image::ImageFormat::Png)
+            .expect("oversized PNG");
+        let error = normalize_avatar(oversized.get_ref()).expect_err("dimension limit");
+        assert_eq!(error.0, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

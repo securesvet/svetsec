@@ -3,6 +3,7 @@ mod github;
 mod http;
 mod python;
 mod ssh;
+mod telegram;
 
 use std::{env, error::Error, net::SocketAddr, path::PathBuf};
 
@@ -42,6 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let address: SocketAddr = env_or("SVETSEC_HTTP_ADDR", "127.0.0.1:3000").parse()?;
     let static_dir = env_or("SVETSEC_STATIC_DIR", "dist");
     let secure_cookie = env_or("SVETSEC_SECURE_COOKIE", "true") != "false";
+    let telegram = telegram_from_env()?;
     let articles_dir = match env_or("SVETSEC_ARTICLES_SOURCE", "local").as_str() {
         "github" => None,
         "local" => Some(PathBuf::from(env_or("SVETSEC_ARTICLES_DIR", "articles"))),
@@ -69,6 +71,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 secure_cookie,
                 http_github,
                 http_pyodide,
+                telegram,
             ),
             static_dir,
         )
@@ -107,4 +110,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 fn env_or(name: &str, default: &str) -> String {
     env::var(name).unwrap_or_else(|_| default.to_owned())
+}
+
+fn telegram_from_env() -> Result<Option<telegram::TelegramAuth>, Box<dyn Error>> {
+    let client_id = env::var("SVETSEC_TELEGRAM_CLIENT_ID").ok();
+    let client_secret = env::var("SVETSEC_TELEGRAM_CLIENT_SECRET").ok();
+    let redirect_url = env::var("SVETSEC_TELEGRAM_REDIRECT_URL").ok();
+    match (client_id, client_secret, redirect_url) {
+        (None, None, None) => {
+            tracing::info!("Telegram login disabled");
+            Ok(None)
+        }
+        (Some(client_id), Some(client_secret), Some(redirect_url)) => Ok(Some(
+            telegram::TelegramAuth::new(client_id, client_secret, redirect_url)?,
+        )),
+        _ => Err("Telegram login requires SVETSEC_TELEGRAM_CLIENT_ID, SVETSEC_TELEGRAM_CLIENT_SECRET, and SVETSEC_TELEGRAM_REDIRECT_URL".into()),
+    }
 }

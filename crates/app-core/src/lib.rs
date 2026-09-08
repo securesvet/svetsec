@@ -377,6 +377,8 @@ pub struct App {
     language: Language,
     authenticated: bool,
     username: Option<String>,
+    avatar_url: Option<String>,
+    telegram_login_enabled: bool,
     comments: Vec<Comment>,
     comments_loading: bool,
     comments_error: Option<String>,
@@ -441,6 +443,24 @@ impl App {
 
     pub fn set_user(&mut self, username: Option<String>) {
         self.username = username;
+    }
+
+    #[must_use]
+    pub fn avatar_url(&self) -> Option<&str> {
+        self.avatar_url.as_deref()
+    }
+
+    pub fn set_avatar_url(&mut self, avatar_url: Option<String>) {
+        self.avatar_url = avatar_url;
+    }
+
+    #[must_use]
+    pub const fn telegram_login_enabled(&self) -> bool {
+        self.telegram_login_enabled
+    }
+
+    pub fn set_telegram_login_enabled(&mut self, enabled: bool) {
+        self.telegram_login_enabled = enabled;
     }
 
     #[must_use]
