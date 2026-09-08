@@ -91,11 +91,18 @@ impl TelegramAuth {
             .and_then(|picture| picture.get(None))
             .map(|picture| picture.as_str().to_owned())
             .filter(|url| url.starts_with("https://"));
+        let username = claims
+            .preferred_username()
+            .map(|username| username.as_str().to_owned())
+            .or_else(|| {
+                claims
+                    .name()
+                    .and_then(|name| name.get(None))
+                    .map(|name| name.as_str().to_owned())
+            });
         Ok(TelegramProfile {
             id: claims.subject().as_str().to_owned(),
-            username: claims
-                .preferred_username()
-                .map(|username| username.as_str().to_owned()),
+            username,
             picture,
         })
     }

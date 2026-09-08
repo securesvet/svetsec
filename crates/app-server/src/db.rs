@@ -327,18 +327,21 @@ impl Database {
                 user_from_row,
             )
             .optional()?;
-        let user = if let Some(user) = existing {
+        let username = available_telegram_username(
+            &transaction,
+            telegram_id,
+            preferred_username,
+            existing.as_ref().map(|user| user.id),
+        )?;
+        let user = if let Some(mut user) = existing {
             transaction.execute(
-                "UPDATE users SET external_avatar_url = ?1 WHERE id = ?2",
-                params![external_avatar_url, user.id],
+                "UPDATE users SET username = ?1, external_avatar_url = ?2 WHERE id = ?3",
+                params![username, external_avatar_url, user.id],
             )?;
-            User {
-                external_avatar_url: external_avatar_url.map(str::to_owned),
-                ..user
-            }
+            user.username = username;
+            user.external_avatar_url = external_avatar_url.map(str::to_owned);
+            user
         } else {
-            let username =
-                available_telegram_username(&transaction, telegram_id, preferred_username)?;
             transaction.execute(
                 "INSERT INTO users(
                     username, password_hash, telegram_id, external_avatar_url, created_at
@@ -634,6 +637,7 @@ fn available_telegram_username(
     connection: &Connection,
     telegram_id: &str,
     preferred_username: Option<&str>,
+    current_user_id: Option<i64>,
 ) -> rusqlite::Result<String> {
     let sanitized = preferred_username
         .unwrap_or_default()
@@ -650,11 +654,11 @@ fn available_telegram_username(
         .chars()
         .rev()
         .collect::<String>();
+    // `svetsec` remains unavailable to password registration, but is safe here:
+    // this path only receives a username from a verified Telegram ID token.
     let base = if (3..=24).contains(&sanitized.len())
-        && !matches!(
-            sanitized.to_ascii_lowercase().as_str(),
-            "guest" | "owner" | "svetsec"
-        ) {
+        && !matches!(sanitized.to_ascii_lowercase().as_str(), "guest" | "owner")
+    {
         sanitized
     } else {
         format!("telegram_{fallback_suffix}")
@@ -672,14 +676,25 @@ fn available_telegram_username(
         if let Some(suffix) = suffix {
             candidate.push_str(&suffix);
         }
-        let exists = connection
-            .query_row(
-                "SELECT 1 FROM users WHERE username = ?1 COLLATE NOCASE",
-                [&candidate],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
+        let exists = match current_user_id {
+            Some(user_id) => connection
+                .query_row(
+                    "SELECT 1 FROM users
+                     WHERE username = ?1 COLLATE NOCASE AND id != ?2",
+                    params![candidate, user_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some(),
+            None => connection
+                .query_row(
+                    "SELECT 1 FROM users WHERE username = ?1 COLLATE NOCASE",
+                    [&candidate],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some(),
+        };
         if !exists {
             return Ok(candidate);
         }
@@ -784,22 +799,18 @@ mod tests {
         );
 
         let user = db
-            .upsert_telegram_user(
-                "123456789",
-                Some("telegram_reader"),
-                Some("https://example.com/avatar.jpg"),
-            )
+            .upsert_telegram_user("123456789", None, Some("https://example.com/avatar.jpg"))
             .expect("Telegram user");
-        assert_eq!(user.username, "telegram_reader");
+        assert_eq!(user.username, "telegram_123456789");
         assert_eq!(
             user.avatar_url().as_deref(),
             Some("https://example.com/avatar.jpg")
         );
         let same_user = db
-            .upsert_telegram_user("123456789", Some("renamed"), None)
+            .upsert_telegram_user("123456789", Some("svetsec"), None)
             .expect("existing Telegram user");
         assert_eq!(same_user.id, user.id);
-        assert_eq!(same_user.username, "telegram_reader");
+        assert_eq!(same_user.username, "svetsec");
 
         let updated = db
             .set_user_avatar(user.id, b"normalized-image", "image/jpeg")
